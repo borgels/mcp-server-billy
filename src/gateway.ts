@@ -292,53 +292,70 @@ function requiredCredential(options: BillyGatewayOptions, name: 'accessToken'): 
  */
 export function createBillyGateway(options: BillyGatewayOptions) {
   let accessToken: string | undefined;
-  let guard: SecretRedactor | undefined;
-  // What the host gave, admitted or not: every error is masked against it.
+  // The host's pseudonym key, in every form it could be written, read before anything else can fail.
+  const pseudonymForms = keyForms((options as Partial<BillyGatewayOptions> | undefined)?.policy?.pseudonymKey);
+  // Every secret is known to the guard before any validation that can throw.
+  const guard = new SecretRedactor();
+  for (const form of pseudonymForms) guard.addSecret(form);
+  // What the host gave, admitted or not: every error is masked against it, the pseudonym key included.
   const given: unknown = (options as Partial<BillyGatewayOptions> | undefined)?.accessToken;
-  const secrets = typeof given === 'string' ? [given, given.trim()] : [];
+  const secrets = [...(typeof given === 'string' ? [given, given.trim()] : []), ...pseudonymForms];
+  const refusal = () => keyRefusedText(accessToken ?? '');
   try {
-    // Admission first, before a redactor is built from the key.
+    // The pseudonym key is admitted like the access token: as text, printable and sharing no piece with any text
+    // of ours, so no fixed text (a fallback, an error, the tool list) can carry a piece of it; as bytes, every
+    // form of it that is printable text (the bytes read as text, hex, base64) the same way.
+    const pseudonymKey: unknown = (options as Partial<BillyGatewayOptions> | undefined)?.policy?.pseudonymKey;
+    const refused =
+      typeof pseudonymKey === 'string'
+        ? !admitsKey(pseudonymKey)
+        : pseudonymForms.some(form => /^[ -~]+$/.test(form) && !admitsKey(form));
+    if (refused) throw new ConfigError(PSEUDONYM_KEY_REFUSED);
+    // Admission of the access token, before a redactor is built from it.
     accessToken = requiredCredential(options, 'accessToken');
-    guard = new SecretRedactor().addSecret(accessToken);
-    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of the key.
+    guard.addSecret(accessToken);
+    // The fixed outputs of the sink check (src/fallbacks.ts) must hold no piece of a key.
     if (leaksSecret(fixedOutputs(), guard)) {
-      throw new ConfigError(keyRefusedText(accessToken));
+      throw new ConfigError(refusal());
     }
     const gateway = buildGateway(options, accessToken);
     // The tool list leaves the gateway as it is: a key that shares a piece with it is refused.
     if (leaksSecret(gateway.tools, guard)) {
-      throw new ConfigError(keyRefusedText(accessToken));
+      throw new ConfigError(refusal());
     }
     return gateway;
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);
-    let message = raw;
-    if (guard && accessToken !== undefined) {
-      // Redacted, then checked whole as the very last step: a message that still holds a piece of the key becomes
-      // the fixed refusal.
-      message = guard.redact(raw);
-      if (leaksSecret(message, guard)) message = keyRefusedText(accessToken);
-    }
+    // Redacted, then checked whole as the very last step: a message that still holds a piece of a key becomes the
+    // fixed refusal.
+    let message = guard.redact(raw);
+    if (leaksSecret(message, guard)) message = refusal();
     // A fresh error in final form (src/key-admission.ts, sealedError): no cause, a stack without frames, and name,
-    // message and stack masked against the key. Then the sink check on the finished object.
+    // message and stack masked against every key. Then the sink check on the finished object.
     const final = sealedError(error instanceof ConfigError ? new ConfigError(message) : new Error(message), ...secrets);
-    if (guard && accessToken !== undefined && leaksSecret(final, guard)) {
-      throw sealedError(new ConfigError(keyRefusedText(accessToken)), ...secrets);
+    if (leaksSecret(final, guard)) {
+      throw sealedError(new ConfigError(refusal()), ...secrets);
     }
     throw final;
   }
 }
 
+const PSEUDONYM_KEY_REFUSED =
+  'policy.pseudonymKey was refused: use at least 32 random printable characters (for example 32 random bytes as hex) or at least 32 random bytes.';
+
+/** A key given as text or bytes, in every form it could be written: as given, or as the bytes read or encoded. */
+function keyForms(key: unknown): string[] {
+  if (typeof key === 'string') return key === '' ? [] : [...new Set([key, key.trim()])];
+  if (key instanceof Uint8Array) {
+    const bytes = Buffer.from(key);
+    return [...new Set(['utf8', 'latin1', 'hex', 'base64', 'base64url'].map(form => bytes.toString(form as BufferEncoding)))];
+  }
+  return [];
+}
+
 /** Register a key given as text or bytes, in every form it could be written. */
 function addKeyMaterial(redactor: SecretRedactor, key: string | Uint8Array): void {
-  if (typeof key === 'string') {
-    redactor.addSecret(key);
-    return;
-  }
-  const bytes = Buffer.from(key);
-  for (const form of [bytes.toString('utf8'), bytes.toString('latin1'), bytes.toString('hex'), bytes.toString('base64'), bytes.toString('base64url')]) {
-    redactor.addSecret(form);
-  }
+  for (const form of keyForms(key)) redactor.addSecret(form);
 }
 
 function buildGateway(options: BillyGatewayOptions, accessToken: string) {

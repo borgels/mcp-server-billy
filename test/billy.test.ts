@@ -4,7 +4,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billyToolCatalog, createBillyGateway, resolveBillyChange, type GatewayJsonObject } from '../src/gateway.js';
 import { BASE } from './helpers.js';
+import { REDACTION_MARKER } from '../src/errors.js';
+import { fixedOutputs, RESULT_WITHHELD } from '../src/fallbacks.js';
+import { FIXED_CORPUS } from '../src/fixed-corpus.generated.js';
 import { logFieldValue } from '../src/tools/billy.js';
+
+// Pseudonym keys: 32 or more random printable characters that share no piece with any text of ours.
+const PSEUDONYM_KEY_1 = 'Qh7Vz2Lr9Xw4Nc8Tp3Yk6Bm1Fs5Jd0Ga'; // gitleaks:allow (a test value, not a key)
+const PSEUDONYM_KEY_2 = 'Wy3Rk8Pq1Zt6Hv9Lc2Xn5Bg7Md4Js0Fe'; // gitleaks:allow (a test value, not a key)
 
 const TOKEN = 'tttt-gggg-wwww-vvvv-1';
 const originalEnv = { ...process.env };
@@ -550,7 +557,7 @@ describe('after review 3', () => {
       accessToken: TOKEN,
       baseUrl: BASE,
       fetchImpl: (async () => Response.json({ contact: { id: 'c1' } })) as typeof fetch,
-      policy: { audit: record => void records.push({ ...record }), pseudonymKey: 'host-pseudonym-key-0001' },
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY_1 }, // gitleaks:allow (a test constant, not a key)
     });
     await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'Jens Jensen, Aarhus' });
     await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'req-42' });
@@ -564,7 +571,7 @@ describe('after review 3', () => {
 });
 
 describe('after review 4', () => {
-  const PSEUDONYM_KEY = 'host-pseudonym-key-0002';
+  const PSEUDONYM_KEY = PSEUDONYM_KEY_2; // gitleaks:allow (a test constant, not a key)
   const page = { meta: { paging: { page: 1, pageCount: 1 } } };
 
   it('refuses an embedded list that is not a list, instead of leaving it out', async () => {
@@ -680,5 +687,145 @@ describe('after review 4', () => {
   it('keeps a value with a hyphen as a kind in the log values', () => {
     expect(logFieldValue('kind', 'on-hold')).toBe('on-hold');
     expect(logFieldValue('kind', '-x')).toBeUndefined();
+  });
+});
+
+describe('after review 5: the pseudonym key anywhere', () => {
+  /** Every piece of six characters of a key (the redactor's fragment length). */
+  const pieces = (key: string) => Array.from({ length: Math.max(0, key.length - 5) }, (_, i) => key.slice(i, i + 6));
+  /** The pieces of any form of the key found in any of the values, raw or serialised. */
+  const leaked = (forms: string[], values: unknown[]) => {
+    const texts = values.map(value => (typeof value === 'string' ? value : JSON.stringify(value) ?? ''));
+    return forms.flatMap(pieces).filter(piece => texts.some(text => text.includes(piece)));
+  };
+  const formsOf = (key: string | Uint8Array) =>
+    typeof key === 'string' ? [key] : ['hex', 'base64', 'base64url', 'latin1'].map(form => Buffer.from(key).toString(form as BufferEncoding));
+  const construct = (options: Record<string, unknown>): Error | undefined => {
+    try {
+      createBillyGateway(options as never);
+      return undefined;
+    } catch (error) {
+      return error as Error;
+    }
+  };
+
+  // Every fixed text of ours long enough to be a key, the fallback texts joined, and texts of ours inside a key.
+  const OWN_TEXTS = [
+    ...FIXED_CORPUS.filter(text => text.length >= 32),
+    `${RESULT_WITHHELD}${REDACTION_MARKER}`,
+    `policy.enableWrites must be a boolean ${'z'.repeat(10)}`,
+    `BILLY_ACCESS_TOKEN-${'7'.repeat(14)}`,
+  ];
+  const BROKEN: Array<Record<string, unknown>> = [
+    {},
+    { baseUrl: 'not a url' },
+    { baseUrl: 'https://elsewhere.invalid/v2' },
+    { accessToken: 'short' },
+    { policy: { enableWrites: 'yes' } },
+    { policy: { disabledTools: ['no_such_tool'] } },
+  ];
+
+  it('refuses a pseudonym key that shares text with ours, and no construction error shows a piece of it', () => {
+    let checked = 0;
+    for (const text of OWN_TEXTS) {
+      for (const key of [text, new TextEncoder().encode(text)]) {
+        for (const broken of BROKEN) {
+          const { policy: brokenPolicy, ...rest } = broken as { policy?: Record<string, unknown> };
+          const error = construct({ accessToken: TOKEN, baseUrl: BASE, ...rest, policy: { ...brokenPolicy, pseudonymKey: key } });
+          expect(error, text).toBeInstanceOf(Error);
+          expect(leaked(formsOf(key), [error!.message, error!.stack, error!.name, error]), text).toEqual([]);
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(50);
+  });
+
+  it('keeps an admitted pseudonym key out of construction errors, the tool list and every fixed output', () => {
+    for (const key of [PSEUDONYM_KEY_1, Buffer.from('a7f3c91e5b2d8046f1e9c3a7b5d20864d18b6e2f4a9c07e35b1d8f62c4a09e17', 'hex')]) {
+      for (const broken of BROKEN.slice(1)) {
+        const { policy: brokenPolicy, ...rest } = broken as { policy?: Record<string, unknown> };
+        const error = construct({ accessToken: TOKEN, baseUrl: BASE, ...rest, policy: { ...brokenPolicy, pseudonymKey: key } });
+        expect(error).toBeInstanceOf(Error);
+        expect(leaked(formsOf(key), [error!.message, error!.stack, error])).toEqual([]);
+      }
+      const gw = createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: key } });
+      expect(leaked(formsOf(key), [gw.tools, billyToolCatalog, fixedOutputs()])).toEqual([]);
+    }
+  });
+
+  it('refuses a pseudonym key that is too short, as text or bytes', () => {
+    for (const key of ['Qh7Vz2Lr9Xw4Nc8Tp3Yk6Bm', new Uint8Array(31)]) {
+      const error = construct({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: key } });
+      expect(error?.message).toMatch(/pseudonymKey/);
+    }
+  });
+
+  it('keeps an admitted pseudonym key out of results, errors and audit records wherever Billy or the host puts it', async () => {
+    const key = PSEUDONYM_KEY_1; // gitleaks:allow (a test constant, not a key)
+    const records: unknown[] = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: (async (input: string | URL | Request) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith('/contacts/c1')) return Response.json({ contact: { id: 'c1', name: key, street: key.slice(3, 20), cityText: `x${key}x` } });
+        if (path.endsWith('/contacts/c2')) return Response.json({ errorMessage: key, errorCode: key }, { status: 400 });
+        if (path.endsWith('/contacts/c3')) return new Response(null, { status: 302, headers: { location: `https://elsewhere.test/${key}` } });
+        throw new TypeError(`fetch failed ${key}`);
+      }) as typeof fetch,
+      policy: { audit: record => void records.push(record), pseudonymKey: key },
+    });
+    const results = [];
+    for (const contactId of ['c1', 'c2', 'c3', 'c4']) {
+      results.push(await gw.callTool('get_contact', { contactId }, { caller: key, requestId: key }));
+    }
+    results.push(await gw.callTool(`get_${key}`, { [key]: key }, { caller: key }));
+    results.push(await gw.callTool('get_contact', { contactId: 'c1', [key]: 1 }));
+    results.push(await gw.callTool('get_contact', { contactId: key }));
+    expect(results[0]?.isError).toBeUndefined();
+    expect(leaked([key], [results, records])).toEqual([]);
+  });
+});
+
+describe('after review 5: answers are checked before they are filtered', () => {
+  const page = { meta: { paging: { page: 1, pageCount: 1 } } };
+
+  it('refuses an integer field with a fraction', async () => {
+    for (const [tool, input, routes] of [
+      ['list_accounts', {}, { 'GET /accounts': { accounts: [{ id: 'a1', accountNo: 12.5 }], ...page } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', paymentTermsDays: 7.5 } } }],
+    ] as Array<[string, GatewayJsonObject, Record<string, unknown>]>) {
+      expect((await call(billy(routes).gw, tool, input)).isError, tool).toBe(true);
+    }
+  });
+
+  it('refuses a list in which a record that would be filtered out has a field of the wrong type', async () => {
+    for (const [tool, input, routes] of [
+      ['list_contacts', { kind: 'customer' }, { 'GET /contacts': { contacts: [{ id: 'c1', isCustomer: 'true' }], ...page } }],
+      ['list_contacts', {}, { 'GET /contacts': { contacts: [{ id: 'c1', isArchived: 'false' }], ...page } }],
+      ['list_products', {}, { 'GET /products': { products: [{ id: 'p1', isArchived: 1 }], ...page } }],
+      ['list_accounts', { bankAccountsOnly: true }, { 'GET /accounts': { accounts: [{ id: 'a1', isBankAccount: 'yes' }], ...page } }],
+      ['list_tax_rates', {}, { 'GET /taxRates': { taxRates: [{ id: 't1', isActive: 'false' }], ...page } }],
+      ['list_daybooks', {}, { 'GET /daybooks': { daybooks: [{ id: 'd1', name: 7 }], ...page } }],
+    ] as Array<[string, GatewayJsonObject, Record<string, unknown>]>) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+    }
+  });
+
+  it('keeps a record id in the audit only as a pseudonym, so a name given as an id is not there', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'Anne-Marie-Hansen' } })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY_2 }, // gitleaks:allow (a test constant, not a key)
+    });
+    await gw.callTool('get_contact', { contactId: 'Anne-Marie-Hansen' });
+    expect(JSON.stringify(records)).not.toMatch(/Anne|Marie|Hansen/);
+    expect((records[0]?.target as Record<string, unknown>).contactId).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect((records[0]?.target as Record<string, unknown>).contactId).toBe((records.at(-1)?.target as Record<string, unknown>).contactId);
   });
 });

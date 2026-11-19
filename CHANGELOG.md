@@ -47,5 +47,10 @@ documentation (https://www.billy.dk/api, API v2).
   the answer instead of being left out, and every field passed on must have
   the type of Billy's property tables (amounts and counts numbers, flags
   booleans, the rest strings; null allowed).
+- After the fifth review: the pseudonym key is at least 32 characters or
+  bytes, admitted like the access token, and known to the error guard before
+  anything is validated; integer fields must be whole numbers; records read
+  to the end are checked before they are filtered; record ids are logged in
+  the audit only as pseudonyms.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.

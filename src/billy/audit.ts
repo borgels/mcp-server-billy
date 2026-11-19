@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -136,16 +136,16 @@ function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
   return { httpStatus: summary.httpStatus, error: summary.message };
 }
 
-/** Identifier fields logged in clear text: they are opaque ids, not secrets. Extend per tool. */
+/**
+ * Record ids. Billy's ids are opaque texts, but the input only checks their
+ * characters, so a name can be given as one: they are logged as pseudonyms
+ * (HMAC-SHA-256 with the host's policy.pseudonymKey, else SHA-256), which
+ * still tie the lines about one record together.
+ */
+const RECORD_ID_FIELDS = ['contactId', 'productId', 'invoiceId', 'billId', 'accountId', 'cashAccountId', 'transactionId', 'daybookId'] as const;
+
+/** Fields logged in clear text: values from fixed lists, dates, amounts, currency codes and paging. Extend per tool. */
 const ID_FIELDS = [
-  'contactId',
-  'productId',
-  'invoiceId',
-  'billId',
-  'accountId',
-  'cashAccountId',
-  'transactionId',
-  'daybookId',
   'state',
   'kind',
   'entryDate',
@@ -183,6 +183,12 @@ export function auditTarget(input: unknown): Record<string, unknown> | undefined
   const value = input as Record<string, unknown>;
   const target: Record<string, unknown> = {};
 
+  for (const field of RECORD_ID_FIELDS) {
+    if (typeof value[field] === 'string' && value[field] !== '') {
+      target[field] = recordPseudonym(value[field] as string);
+    }
+  }
+
   for (const field of ID_FIELDS) {
     if (value[field] !== undefined) {
       target[field] = value[field];
@@ -202,6 +208,13 @@ export function auditTarget(input: unknown): Record<string, unknown> | undefined
   }
 
   return target;
+}
+
+/** A record id as the audit keeps it: 16 hex characters of HMAC-SHA-256 with the host's key, else of SHA-256. */
+function recordPseudonym(value: string): string {
+  const key = currentInstancePolicy()?.pseudonymKey;
+  if (key !== undefined && key.length > 0) return `hmac:${createHmac('sha256', key).update(value).digest('hex').slice(0, 16)}`;
+  return `sha256:${createHash('sha256').update(value).digest('hex').slice(0, 16)}`;
 }
 
 function hashValue(value: string): string {

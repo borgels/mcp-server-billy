@@ -97,9 +97,13 @@ const BOOLEAN_FIELDS = new Set([
   'appliesToSales',
 ]);
 
+/** The number fields that are integers in the property tables (`integer`, not `float`), and the paging counts. */
+const INTEGER_FIELDS = new Set(['accountNo', 'priority', 'paymentTermsDays', 'fiscalYearEndMonth', 'page', 'pageCount', 'pageSize', 'total']);
+
 /** Whether `value` has the documented type of `field` (or is null). */
 function hasFieldType(field: string, value: unknown): boolean {
   if (value === null) return true;
+  if (INTEGER_FIELDS.has(field)) return Number.isSafeInteger(value);
   if (STRING_OR_NUMBER_FIELDS.has(field)) return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
   if (NUMBER_FIELDS.has(field)) return typeof value === 'number' && Number.isFinite(value);
   if (BOOLEAN_FIELDS.has(field)) return typeof value === 'boolean';
@@ -238,12 +242,16 @@ async function scanAll(
   client: UpstreamClient,
   path: string,
   key: string,
+  fields: readonly string[],
   query: Record<string, QueryValue> = {},
 ): Promise<{ records: Json[]; complete: boolean }> {
   const records: Json[] = [];
   for (let page = 1; records.length < MAX_SCAN_RECORDS; page += 1) {
     const body = await get(client, path, { ...query, page, pageSize: MAX_PAGE_SIZE });
     const page_ = list(body, key);
+    // Every record is checked before it is filtered or counted: a field of another type than documented (a flag
+    // as text, say) refuses the answer rather than leaving the record out of the matches without a word.
+    for (const record of page_) pick(record, fields);
     records.push(...page_);
     const meta = paging(body);
     const pageCount = typeof meta?.pageCount === 'number' ? meta.pageCount : page;
@@ -296,7 +304,7 @@ export async function listContacts(
   client: UpstreamClient,
   input: { kind?: 'customer' | 'supplier' | 'all'; query?: string; includeArchived?: boolean; limit?: number },
 ): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/contacts', 'contacts');
+  const { records, complete } = await scanAll(client, '/contacts', 'contacts', CONTACT_FIELDS);
   const kind = input.kind ?? 'all';
   const matches = records.filter(
     contact =>
@@ -397,7 +405,7 @@ export async function listProducts(
   client: UpstreamClient,
   input: { query?: string; includeArchived?: boolean; limit?: number },
 ): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/products', 'products', { include: 'product.prices:embed' });
+  const { records, complete } = await scanAll(client, '/products', 'products', PRODUCT_FIELDS, { include: 'product.prices:embed' });
   const matches = records.filter(
     product =>
       (input.includeArchived || product.isArchived !== true) &&
@@ -775,7 +783,7 @@ export async function listAccounts(
   input: { bankAccountsOnly?: boolean; paymentEnabledOnly?: boolean; includeArchived?: boolean; query?: string },
 ): Promise<Json> {
   // isBankAccount is the filter the documentation names under bank lines ("GET /v2/accounts?isBankAccount=true").
-  const { records, complete } = await scanAll(client, '/accounts', 'accounts', input.bankAccountsOnly ? { isBankAccount: true } : {});
+  const { records, complete } = await scanAll(client, '/accounts', 'accounts', ACCOUNT_FIELDS, input.bankAccountsOnly ? { isBankAccount: true } : {});
   const accounts = records.filter(
     account =>
       (input.includeArchived || account.isArchived !== true) &&
@@ -806,8 +814,9 @@ export async function listPostings(client: UpstreamClient, input: Json): Promise
 }
 
 export async function listDaybooks(client: UpstreamClient): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/daybooks', 'daybooks');
-  return { daybooks: records.map(daybook => pick(daybook, ['id', 'name', 'defaultContraAccountId'])), complete };
+  const fields = ['id', 'name', 'defaultContraAccountId'];
+  const { records, complete } = await scanAll(client, '/daybooks', 'daybooks', fields);
+  return { daybooks: records.map(daybook => pick(daybook, fields)), complete };
 }
 
 export const DAYBOOK_TRANSACTION_FILTERS = ['daybookId', 'state', 'minEntryDate', 'maxEntryDate', 'q'] as const;
@@ -873,11 +882,10 @@ export async function createDaybookTransaction(client: UpstreamClient, input: Da
 }
 
 export async function listTaxRates(client: UpstreamClient, input: { includeInactive?: boolean }): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/taxRates', 'taxRates');
+  const fields = ['id', 'name', 'abbreviation', 'rate', 'appliesToSales', 'appliesToPurchases', 'isActive'];
+  const { records, complete } = await scanAll(client, '/taxRates', 'taxRates', fields);
   return {
-    taxRates: records
-      .filter(rate => input.includeInactive || rate.isActive !== false)
-      .map(rate => pick(rate, ['id', 'name', 'abbreviation', 'rate', 'appliesToSales', 'appliesToPurchases', 'isActive'])),
+    taxRates: records.filter(rate => input.includeInactive || rate.isActive !== false).map(rate => pick(rate, fields)),
     complete,
   };
 }

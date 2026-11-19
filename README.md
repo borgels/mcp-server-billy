@@ -128,7 +128,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 |---|---|---|
 | `BILLY_ENABLE_WRITES` | `false` | Enable the write tools. |
 | `BILLY_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `billy_` prefix. |
-| `BILLY_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text (names, numbers, descriptions, searches) hashed, lists counted, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
+| `BILLY_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with record ids as pseudonyms, states, dates and amounts in clear text, free text (names, numbers, descriptions, searches) hashed, lists counted, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
 
 ### HTTP transport
 
@@ -220,7 +220,7 @@ refusal is a fixed text that never repeats the key. The standalone MCP server re
 with its token and withholds a result that still holds a piece of it, as
 the gateway does.
 
-**Call context in the audit.** The `caller` a host passes is never logged in clear: it becomes a pseudonym (HMAC-SHA-256 with `policy.pseudonymKey`, at least 16 characters, else SHA-256). Nor is a `requestId`: any text can hold a name, a phone number or an address, so the audit keeps its pseudonym the same way, which still ties the lines of one call together for a host that knows the key; without one the audit makes its own id. The pseudonym key is a secret of the instance like the access token: it is redacted from results, audit records and errors.
+**Call context in the audit.** The `caller` a host passes is never logged in clear: it becomes a pseudonym (HMAC-SHA-256 with `policy.pseudonymKey`, else SHA-256). The key is at least 32 random printable characters or 32 random bytes and is admitted like the access token: a key that shares a piece of six characters with any text of this server is refused, so no error, fallback or tool description can carry part of it. Record ids are logged as pseudonyms the same way, since the input cannot tell an id from a name. Nor is a `requestId`: any text can hold a name, a phone number or an address, so the audit keeps its pseudonym the same way, which still ties the lines of one call together for a host that knows the key; without one the audit makes its own id. The pseudonym key is a secret of the instance like the access token: it is redacted from results, audit records and errors.
 
 **Rejected calls.** A call refused before it runs (an unknown tool or
 invalid input) is audited with a fixed code (`unknown_tool`,
