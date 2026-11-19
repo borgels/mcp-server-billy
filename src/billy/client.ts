@@ -1,10 +1,6 @@
 import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString, type Env } from '../config-env.js';
 import { BillyHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
-import { createHash, randomBytes } from 'node:crypto';
 import { USER_AGENT } from '../version.js';
-
-/** Random per process: a lock key cannot be compared with one from another process or turned back into a token. */
-const LOCK_SALT = randomBytes(32);
 
 export interface BillyClientOptions {
   /** access token. When omitted, read from BILLY_ACCESS_TOKEN in `credentialEnv`. */
@@ -128,12 +124,6 @@ export interface UpstreamClient {
   get<T>(path: string, query?: Record<string, QueryValue>): Promise<T>;
   post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
   put<T>(path: string, body?: unknown): Promise<T>;
-  /**
-   * A key for serialising writes to one company in this process: a salted
-   * hash of the base URL and token (the salt is random per process), never
-   * the token. See registerPayment.
-   */
-  lockScope(): string;
 }
 
 /**
@@ -149,7 +139,6 @@ export function readOnlyClient(client: UpstreamClient, toolName: string): Upstre
     get: (path, query) => client.get(path, query),
     post: refuse('POST'),
     put: refuse('PUT'),
-    lockScope: () => client.lockScope(),
   };
 }
 
@@ -216,10 +205,6 @@ export class BillyClient implements UpstreamClient {
 
   async post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T> {
     return this.request<T>('POST', this.buildUrl(path, query), body);
-  }
-
-  lockScope(): string {
-    return createHash('sha256').update(LOCK_SALT).update(`${this.baseUrl}\n${this.accessToken ?? ''}`).digest('hex').slice(0, 32);
   }
 
   async put<T>(path: string, body?: unknown): Promise<T> {

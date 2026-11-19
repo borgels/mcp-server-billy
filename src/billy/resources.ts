@@ -52,18 +52,29 @@ export class UnexpectedAnswerError extends Error {
   }
 }
 
-/** The record under a singular root key (`{ invoice: {...} }`). Anything else is refused. */
+/** A record with an id: Billy's ids are non-empty strings. */
+function hasId(record: Json | undefined): record is Json {
+  return record !== undefined && typeof record.id === 'string' && record.id !== '';
+}
+
+/** The record under a singular root key (`{ invoice: {...} }`), with an id. Anything else is refused. */
 function single(body: unknown, key: string): Json {
   const record = asRecord(asRecord(body)?.[key]);
-  if (!record) throw new UnexpectedAnswerError();
+  if (!hasId(record)) throw new UnexpectedAnswerError();
   return record;
 }
 
-/** The list under a plural root key (`{ invoices: [...] }`). Anything else is refused. */
+/**
+ * The list under a plural root key (`{ invoices: [...] }`). Every entry must
+ * be a record with an id: one entry that is not refuses the whole answer,
+ * rather than leaving it out without a word.
+ */
 function list(body: unknown, key: string): Json[] {
   const value = asRecord(body)?.[key];
   if (!Array.isArray(value)) throw new UnexpectedAnswerError();
-  return asArray(value);
+  const records = value.map(asRecord);
+  if (!records.every(hasId)) throw new UnexpectedAnswerError();
+  return records as Json[];
 }
 
 /**
@@ -72,7 +83,7 @@ function list(body: unknown, key: string): Json[] {
  * so a write is never reported as done without the record it made.
  */
 function firstChanged(body: unknown, key: string): Json {
-  const changed = list(body, key).find(record => typeof record.id === 'string' && record.id !== '');
+  const [changed] = list(body, key);
   if (!changed) throw new UnexpectedAnswerError();
   return changed;
 }
@@ -569,17 +580,29 @@ export async function registerPayment(client: UpstreamClient, input: PaymentInpu
   const isInvoice = input.invoiceId !== undefined;
   const subjectId = (isInvoice ? input.invoiceId : input.billId) as string;
   const kind = isInvoice ? 'invoice' : 'bill';
-  // One registration at a time per company and document in this process: the balance is read again after the
-  // previous one has finished, so two calls cannot both pass the check against the same balance.
-  return serialised(`${client.lockScope()}:${kind}:${subjectId}`, async () => {
+  // The company the token belongs to, by its Billy id: the same for every token and API host of the company.
+  const organizationId = single(await get(client, '/organization'), 'organization').id as string;
+  // One registration at a time per company and document in this process, whichever token or host the call came
+  // through: the balance is read again after the previous one has finished, so two calls cannot both pass the check
+  // against the same balance.
+  return serialised(`${organizationId}:${kind}:${subjectId}`, async () => {
     const subject = isInvoice
       ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice')
       : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill');
+    // The lock holds only if the document is the company's (organizationId, the documented belongs-to of each).
+    if (subject.organizationId !== organizationId) {
+      throw new Error(`Refused: the ${kind} does not show that it belongs to this company. Nothing was sent.`);
+    }
     if (subject.state !== 'approved') throw new Error(`Refused: the ${kind} is not approved. Nothing was sent.`);
     if (subject.isPaid === true) throw new Error(`Refused: the ${kind} is already paid. Nothing was sent.`);
-    // Credit notes are refused: a payment here is always money in for an invoice and money out for a bill.
-    if (isInvoice ? subject.type !== 'invoice' : subject.type !== undefined && subject.type !== 'bill') {
-      throw new Error(`Refused: this is not an ordinary ${kind} (a credit note, or a type this server does not know). Nothing was sent.`);
+    // Only an ordinary invoice or bill, by its type: a payment here is always money in for an invoice and money out
+    // for a bill. A credit note, a missing type or a type this server does not know is refused. A bill that credits
+    // another (creditedBillId) is refused as well.
+    const ordinary = isInvoice
+      ? subject.type === 'invoice'
+      : subject.type === 'bill' && (subject.creditedBillId === undefined || subject.creditedBillId === null);
+    if (!ordinary) {
+      throw new Error(`Refused: this is not an ordinary ${kind} (a credit note, or no type this server knows). Nothing was sent.`);
     }
     if (typeof subject.balance !== 'number' || !Number.isFinite(subject.balance) || subject.balance <= 0) {
       throw new Error(`Refused: the ${kind} has no positive outstanding balance. Nothing was sent.`);
@@ -620,7 +643,7 @@ export async function registerPayment(client: UpstreamClient, input: PaymentInpu
   });
 }
 
-/** Work in flight per key, in this process only. A key holds no secret (see lockScope) and is dropped when done. */
+/** Work in flight per key (company id, kind, document id), in this process only. A key is dropped when done. */
 const inFlight = new Map<string, Promise<unknown>>();
 
 async function serialised<T>(key: string, work: () => Promise<T>): Promise<T> {

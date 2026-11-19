@@ -63,7 +63,7 @@ describe('instance policy from the host', () => {
       expect(gw.tools.map(tool => tool.name)).toContain('get_contact');
       const read = await gw.callTool('get_contact', { contactId: 'i1' });
       expect(read.isError).toBeUndefined();
-      const write = await gw.callTool('create_contact', { name: 'n', countryId: 'DK' });
+      const write = await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 });
       expect(write.isError).toBe(true);
       expect(texts(write).join(' ')).toMatch(/host has not enabled writes/);
     });
@@ -84,7 +84,7 @@ describe('instance policy from the host', () => {
 
     const [denied, allowed] = await Promise.all([
       a.callTool('get_contact', { contactId: 'i1' }),
-      b.callTool('create_contact', { name: 'n', countryId: 'DK' }),
+      b.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }),
     ]);
     expect(denied.isError).toBe(true);
     expect(texts(denied).join(' ')).toMatch(/disabled on this instance/);
@@ -117,7 +117,7 @@ describe('instance policy from the host', () => {
         },
       },
     });
-    const write = await refusing.callTool('create_contact', { name: 'n', countryId: 'DK' });
+    const write = await refusing.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 });
     expect(write.isError).toBe(true);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -134,7 +134,7 @@ describe('instance policy from the host', () => {
   it('still uses the environment without a host policy', async () => {
     process.env.BILLY_ENABLE_WRITES = 'true';
     const gw = createBillyGateway({ accessToken: KEY, baseUrl: BASE, fetchImpl: routes() as unknown as typeof fetch });
-    const write = await gw.callTool('create_contact', { name: 'n', countryId: 'DK' });
+    const write = await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 });
     expect(write.isError).toBeUndefined();
   });
 });

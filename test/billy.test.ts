@@ -18,7 +18,7 @@ afterEach(() => {
 type Handler = (url: URL, init: RequestInit) => unknown;
 
 /** A Billy stand-in: routes by "METHOD /path" (path relative to /v2). An unknown route answers 404. */
-function billy(routes: Record<string, Handler | unknown>) {
+function billy(routes: Record<string, Handler | unknown>, token = TOKEN) {
   const calls: Array<{ method: string; path: string; query: URLSearchParams; body: unknown }> = [];
   const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -31,7 +31,7 @@ function billy(routes: Record<string, Handler | unknown>) {
     return Response.json(body);
   });
   const gw = createBillyGateway({
-    accessToken: TOKEN,
+    accessToken: token,
     baseUrl: BASE,
     maxAttempts: 1,
     fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -39,6 +39,9 @@ function billy(routes: Record<string, Handler | unknown>) {
   });
   return { gw, calls, fetchImpl };
 }
+
+/** The company of the token, as GET /organization answers it. */
+const ORGANIZATION = { 'GET /organization': { organization: { id: 'o1', name: 'Demo ApS' } } };
 
 const call = async (gw: ReturnType<typeof billy>['gw'], tool: string, input: GatewayJsonObject = {}) => {
   const result = await gw.callTool(tool, input);
@@ -217,7 +220,10 @@ describe('writes', () => {
   });
 
   const paymentRoutes = (invoice: Record<string, unknown>, account: Record<string, unknown>) => ({
-    'GET /invoices/i1': { invoice: { id: 'i1', type: 'invoice', state: 'approved', isPaid: false, balance: 1250, currencyId: 'DKK', ...invoice } },
+    ...ORGANIZATION,
+    'GET /invoices/i1': {
+      invoice: { id: 'i1', organizationId: 'o1', type: 'invoice', state: 'approved', isPaid: false, balance: 1250, currencyId: 'DKK', ...invoice },
+    },
     'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK', ...account } },
     'POST /bankPayments': { bankPayments: [{ id: 'bp1', cashAmount: 1250, cashSide: 'debit', cashAccountId: 'a1', entryDate: '2026-11-19' }] },
   });
@@ -243,7 +249,8 @@ describe('writes', () => {
 
   it('registers a bill payment as money out', async () => {
     const { gw, calls } = billy({
-      'GET /bills/b1': { bill: { id: 'b1', state: 'approved', isPaid: false, balance: 300, currencyId: 'DKK' } },
+      ...ORGANIZATION,
+      'GET /bills/b1': { bill: { id: 'b1', organizationId: 'o1', type: 'bill', state: 'approved', isPaid: false, balance: 300, currencyId: 'DKK' } },
       'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } },
       'POST /bankPayments': { bankPayments: [{ id: 'bp2' }] },
     });
@@ -332,7 +339,7 @@ describe('change resolution for a host log', () => {
 
     const contact = resolveBillyChange(
       'create_contact',
-      { name: 'Jens Jensen', countryId: 'DK', contactNo: 'K-100', isCustomer: true, contactPersons: [{ email: 'jens@example.test' }] },
+      { name: 'Jens Jensen', countryId: 'DK', paymentTermsDays: 8, contactNo: 'K-100', isCustomer: true, contactPersons: [{ email: 'jens@example.test' }] },
       { pseudonymKey: 'host-key' },
     );
     expect(contact.ok && contact.change.values).toEqual({
@@ -358,8 +365,9 @@ describe('after review', () => {
   it('registers one payment at a time per document, so two calls cannot both pass the balance check', async () => {
     let balance = 100;
     const { gw, calls } = billy({
+      ...ORGANIZATION,
       'GET /invoices/i1': () => ({
-        invoice: { id: 'i1', type: 'invoice', state: 'approved', isPaid: balance <= 0, balance, currencyId: 'DKK' },
+        invoice: { id: 'i1', organizationId: 'o1', type: 'invoice', state: 'approved', isPaid: balance <= 0, balance, currencyId: 'DKK' },
       }),
       'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } },
       'POST /bankPayments': () => {
@@ -380,15 +388,88 @@ describe('after review', () => {
     ['an unknown invoice currency', { currencyId: undefined }, {}],
     ['an unknown account currency', {}, { currencyId: undefined }],
     ['an invalid currency', {}, { currencyId: 'dkk' }],
+    ['another company', { organizationId: 'o2' }, {}],
+    ['no company', { organizationId: undefined }, {}],
   ])('refuses a payment with %s', async (_name, invoice, account) => {
     const { gw, calls } = billy({
-      'GET /invoices/i1': { invoice: { id: 'i1', type: 'invoice', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK', ...invoice } },
+      ...ORGANIZATION,
+      'GET /invoices/i1': {
+        invoice: { id: 'i1', organizationId: 'o1', type: 'invoice', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK', ...invoice },
+      },
       'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK', ...account } },
       'POST /bankPayments': { bankPayments: [{ id: 'bp' }] },
     });
     const result = await call(gw, 'register_payment', { invoiceId: 'i1', cashAccountId: 'a1', amount: 50, entryDate: '2026-11-19' });
     expect(result.isError).toBe(true);
     expect(calls.some(c => c.method === 'POST')).toBe(false);
+  });
+
+  it('registers one payment at a time per company and document, whichever token the call came through', async () => {
+    let balance = 100;
+    const posts: unknown[] = [];
+    const routes = {
+      ...ORGANIZATION,
+      'GET /invoices/i1': () => ({
+        invoice: { id: 'i1', organizationId: 'o1', type: 'invoice', state: 'approved', isPaid: balance <= 0, balance, currencyId: 'DKK' },
+      }),
+      'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } },
+      'POST /bankPayments': (_url: URL, init: RequestInit) => {
+        posts.push(init.body);
+        balance -= 100;
+        return { bankPayments: [{ id: `bp${balance}` }] };
+      },
+    };
+    // Two tokens of the same company, as two gateway instances (two connections in a host).
+    const one = billy(routes, 'tttt-gggg-wwww-vvvv-1');
+    const two = billy(routes, 'kkkk-pppp-qqqq-zzzz-2');
+    const input = { invoiceId: 'i1', cashAccountId: 'a1', amount: 100, entryDate: '2026-11-19' };
+    const results = await Promise.all([call(one.gw, 'register_payment', input), call(two.gw, 'register_payment', input)]);
+    expect(results.map(result => result.isError).sort()).toEqual([true, undefined]);
+    expect(posts).toHaveLength(1);
+  });
+
+  it.each([
+    ['without a type', { type: undefined }],
+    ['of an unknown type', { type: 'other' }],
+    ['that credits another bill', { creditedBillId: 'b0' }],
+  ])('refuses a payment of a bill %s', async (_name, bill) => {
+    const { gw, calls } = billy({
+      ...ORGANIZATION,
+      'GET /bills/b1': {
+        bill: { id: 'b1', organizationId: 'o1', type: 'bill', state: 'approved', isPaid: false, balance: 300, currencyId: 'DKK', ...bill },
+      },
+      'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } },
+      'POST /bankPayments': { bankPayments: [{ id: 'bp' }] },
+    });
+    const result = await call(gw, 'register_payment', { billId: 'b1', cashAccountId: 'a1', amount: 300, entryDate: '2026-11-19' });
+    expect(result.isError).toBe(true);
+    expect(calls.some(c => c.method === 'POST')).toBe(false);
+  });
+
+  it('refuses a record without an id, and a list with an entry that is not a record with an id', async () => {
+    for (const routes of [
+      { 'GET /organization': { organization: {} } },
+      { 'GET /organization': { organization: { id: '' } } },
+    ]) {
+      const { gw } = billy(routes);
+      const result = await call(gw, 'check_connection');
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain('without the expected data');
+    }
+    for (const invoices of [[null, 'bad', {}], [{ id: 'i1' }, {}], [{ id: 'i1' }, null]]) {
+      const { gw } = billy({ 'GET /invoices': { invoices, meta: { paging: { page: 1 } } } });
+      expect((await call(gw, 'list_invoices')).isError).toBe(true);
+    }
+    const { gw } = billy({ 'GET /invoices': { invoices: [], meta: { paging: { page: 1 } } } });
+    expect((await call(gw, 'list_invoices')).isError).toBeUndefined();
+  });
+
+  it('requires payment terms when a contact is created, as Billy documents the field as required', async () => {
+    const { gw, calls } = billy({ 'POST /contacts': { contacts: [{ id: 'c1' }] } });
+    expect((await call(gw, 'create_contact', { name: 'X', countryId: 'DK' })).isError).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect((await call(gw, 'create_contact', { name: 'X', countryId: 'DK', paymentTermsDays: 8 })).isError).toBeUndefined();
+    expect(calls.at(-1)?.body).toMatchObject({ contact: { paymentTermsDays: 8 } });
   });
 
   it('refuses an answer without the documented root key, and a write answer without the changed record', async () => {
@@ -403,7 +484,7 @@ describe('after review', () => {
     expect(check.content[0]?.text).toContain('without the expected data');
 
     const { gw } = billy({ 'POST /contacts': { contacts: [] }, 'GET /invoices': { meta: {} } });
-    expect((await call(gw, 'create_contact', { name: 'X', countryId: 'DK' })).isError).toBe(true);
+    expect((await call(gw, 'create_contact', { name: 'X', countryId: 'DK', paymentTermsDays: 8 })).isError).toBe(true);
     expect((await call(gw, 'list_invoices', {})).isError).toBe(true);
   });
 

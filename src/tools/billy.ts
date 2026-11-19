@@ -213,8 +213,10 @@ const contactFieldsShape = {
   ean: z.string().trim().regex(/^\d{13}$/).optional().describe('EAN (GLN) number for e-invoices, 13 digits.'),
   isCustomer: z.boolean().optional().describe('The contact is a customer (can have invoices).'),
   isSupplier: z.boolean().optional().describe('The contact is a supplier (can have bills).'),
-  paymentTermsDays: z.number().int().min(-365).max(365).optional().describe('Payment terms in days.'),
 };
+
+/** Billy documents paymentTermsDays as required, with no default: required when a contact is created. */
+const paymentTermsDaysSchema = z.number().int().min(-365).max(365).describe('Payment terms in days, e.g. 8.');
 
 const productFieldsShape = {
   description: text(1000).optional().describe('Default text on invoice lines with the product.'),
@@ -468,6 +470,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
       name: text(255).describe('Company or person name.'),
       ...contactFieldsShape,
       countryId: z.string().trim().regex(COUNTRY_PATTERN).describe('ISO country code, e.g. DK.'),
+      paymentTermsDays: paymentTermsDaysSchema,
       contactPersons: z
         .array(
           z.strictObject({
@@ -506,13 +509,14 @@ export const BILLY_TOOLS: ToolDefinition[] = [
       contactId: recordId('The contact id, from list_contacts.'),
       name: text(255).optional(),
       ...contactFieldsShape,
+      paymentTermsDays: paymentTermsDaysSchema.optional(),
     },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
     summary: 'Updated contact.',
     upstream: [{ access: 'write', method: 'PUT', path: '/contacts/{contactId}' }],
     change: change('update', 'contact', { contactId: 'recordId', isCustomer: 'flag', isSupplier: 'flag' }),
-    check: atLeastOneChange(['name', ...Object.keys(contactFieldsShape)]),
+    check: atLeastOneChange(['name', 'paymentTermsDays', ...Object.keys(contactFieldsShape)]),
     handler: async (client, input) => updateContact(client, input),
   }),
   defineTool({
@@ -601,6 +605,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
     returnsUpstreamContent: true,
     summary: 'Registered payment.',
     upstream: [
+      { access: 'read', method: 'GET', path: '/organization' },
       { access: 'read', method: 'GET', path: '/invoices/{invoiceId}' },
       { access: 'read', method: 'GET', path: '/bills/{billId}' },
       { access: 'read', method: 'GET', path: '/accounts/{cashAccountId}' },

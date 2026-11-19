@@ -62,7 +62,7 @@ describe('MCP tool surface', () => {
 
   it('refuses the write tool unless writes are enabled, without calling upstream', async () => {
     const { mcpClient, fetchImpl } = await connect();
-    const result = await mcpClient.callTool({ name: 'billy_create_contact', arguments: { name: 'New', countryId: 'DK' } });
+    const result = await mcpClient.callTool({ name: 'billy_create_contact', arguments: { name: 'New', countryId: 'DK', paymentTermsDays: 8 } });
     expect(result.isError).toBe(true);
     expect(texts(result).join(' ')).toContain('BILLY_ENABLE_WRITES');
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -74,13 +74,13 @@ describe('MCP tool surface', () => {
     const { mcpClient, fetchImpl } = await connect({ [`POST ${BASE}/contacts`]: { status: 200, body: { contacts: [item] } } });
     const result = await mcpClient.callTool({
       name: 'billy_create_contact',
-      arguments: { name: 'First item', countryId: 'DK', isCustomer: true, contactPersons: [{ name: 'A Person', email: 'a@example.test' }] },
+      arguments: { name: 'First item', countryId: 'DK', paymentTermsDays: 8, isCustomer: true, contactPersons: [{ name: 'A Person', email: 'a@example.test' }] },
     });
     expect(result.isError).toBeFalsy();
     expect(JSON.parse(texts(result)[0] ?? '')).toEqual(item);
     const init = fetchImpl.mock.calls[0]?.[1];
     expect(JSON.parse(String(init?.body))).toEqual({
-      contact: { name: 'First item', countryId: 'DK', isCustomer: true, contactPersons: [{ name: 'A Person', email: 'a@example.test' }] },
+      contact: { name: 'First item', countryId: 'DK', paymentTermsDays: 8, isCustomer: true, contactPersons: [{ name: 'A Person', email: 'a@example.test' }] },
     });
 
     const lines = auditLines(process.env.BILLY_AUDIT_LOG);
@@ -109,7 +109,7 @@ describe('MCP tool surface', () => {
     const { mcpClient, fetchImpl } = await connect({ [`POST ${BASE}/contacts`]: { body: { contacts: [item] } } });
     // The log becomes unwritable after startup.
     process.env.BILLY_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
-    const result = await mcpClient.callTool({ name: 'billy_create_contact', arguments: { name: 'x', countryId: 'DK' } });
+    const result = await mcpClient.callTool({ name: 'billy_create_contact', arguments: { name: 'x', countryId: 'DK', paymentTermsDays: 8 } });
     expect(result.isError).toBe(true);
     expect(texts(result).join(' ')).toContain('Audit log is not writable');
     expect(fetchImpl).not.toHaveBeenCalled();
@@ -212,7 +212,7 @@ describe('gateway export', () => {
     expect(invalid.isError).toBe(true);
     const unknown = await gw.callTool('delete_everything', {});
     expect(unknown.isError).toBe(true);
-    const write = await gw.callTool('create_contact', { name: 'x', countryId: 'DK' });
+    const write = await gw.callTool('create_contact', { name: 'x', countryId: 'DK', paymentTermsDays: 8 });
     expect(write.isError).toBe(true);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
 

@@ -186,7 +186,7 @@ const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
   list_daybooks: {},
   list_daybook_transactions: { state: 'draft' },
   list_tax_rates: {},
-  create_contact: { name: 'New contact', countryId: 'DK', isCustomer: true },
+  create_contact: { name: 'New contact', countryId: 'DK', isCustomer: true, paymentTermsDays: 8 },
   update_contact: { contactId: 'c1', phone: '12345678' },
   create_product: { name: 'New product', prices: [{ currencyId: 'DKK', unitPrice: 100 }] },
   update_product: { productId: 'p1', name: 'Renamed' },
@@ -200,7 +200,7 @@ const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
 async function catalogFetch(input: string | URL | Request): Promise<Response> {
   const path = new URL(String(input)).pathname;
   if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft' }, invoices: [{ id: 'i1' }] });
-  if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
+  if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', organizationId: 'x1', type: 'bill', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
   if (path.includes('/accounts/')) return Response.json({ account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } });
   // Every list and record root key the tools read, and one changed record for every write.
   const roots = ['organization', 'contact', 'product'];

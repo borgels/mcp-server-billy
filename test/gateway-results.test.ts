@@ -56,7 +56,7 @@ const upstream: typeof fetch = async (input, init) => {
   if (init?.method === 'POST') return json({ contacts: [{ id: 'new', name: { echo: KEY, [KEY]: FRAGMENT } }] }, 201);
   switch (path) {
     case '/contacts/echo':
-      return json({ contact: { name: { name: KEY, fragment: FRAGMENT, [KEY]: 1, [`k ${FRAGMENT}`]: { deeper: [FRAGMENT, KEY] } } } });
+      return json({ contact: { id: 'x', name: { name: KEY, fragment: FRAGMENT, [KEY]: 1, [`k ${FRAGMENT}`]: { deeper: [FRAGMENT, KEY] } } } });
     case '/contacts/error':
       return json({ message: `Rejected ${KEY}`, code: FRAGMENT, details: { [KEY]: FRAGMENT } }, 400);
     case '/contacts/unauthorised':
@@ -89,7 +89,7 @@ describe('no piece of the key leaves an instance', () => {
     for (const contactId of ['echo', 'error', 'unauthorised', 'big-error', 'big', 'redirect', 'network', 'missing']) {
       results.push(await gw.callTool('get_contact', { contactId }, { caller: `caller ${KEY}`, requestId: FRAGMENT }));
     }
-    results.push(await gw.callTool('create_contact', { name: KEY, countryId: 'DK' }));
+    results.push(await gw.callTool('create_contact', { name: KEY, countryId: 'DK', paymentTermsDays: 8 }));
     results.push(await gw.callTool(`get_item ${KEY}`, {}), await gw.callTool('get_contact', { contactId: 'x', [KEY]: FRAGMENT }));
 
     expect(results[0]?.isError).toBeUndefined();
@@ -105,7 +105,7 @@ describe('no piece of the key leaves an instance', () => {
       try {
         // Without a host policy the environment applies: the bad value fails at creation or at the call.
         const gw = createBillyGateway({ accessToken: KEY, baseUrl: BASE, fetchImpl: upstream });
-        answers.push(await gw.callTool('create_contact', { name: 'x', countryId: 'DK' }));
+        answers.push(await gw.callTool('create_contact', { name: 'x', countryId: 'DK', paymentTermsDays: 8 }));
       } catch (error) {
         answers.push((error as Error).message);
       }

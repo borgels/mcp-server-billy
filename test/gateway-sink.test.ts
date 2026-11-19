@@ -47,7 +47,7 @@ async function outputs(accessToken: string): Promise<{ refused?: string; outputs
   }
   const results = [
     await gw.callTool('get_contact', { contactId: 'i1' }, { caller: 'person-1', requestId: 'r1' }),
-    await gw.callTool('create_contact', { name: 'n', countryId: 'DK' }, { caller: 'person-1', requestId: 'r2' }),
+    await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { caller: 'person-1', requestId: 'r2' }),
     await gw.callTool('get_contact', { contactId: 'missing' }),
     await gw.callTool('no_such_tool', {}),
     await gw.callTool('get_contact', { unknown: 1 }),
@@ -110,7 +110,7 @@ describe('the sink check', () => {
 const asContact =
   (body: unknown): typeof fetch =>
   async (_input, init) =>
-    init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { name: body } });
+    init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { id: 'x', name: body } });
 
 describe('failure texts', () => {
   it('replaces texts in failure lists of a successful answer, for reads and writes', async () => {
@@ -121,7 +121,7 @@ describe('failure texts', () => {
       policy: { enableWrites: true },
       fetchImpl: asContact({ data: { failures: ['Vendor diagnostic'], errors: ['Vendor diagnostic'] } }),
     });
-    for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK' })]) {
+    for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
       expect(JSON.stringify(result)).not.toContain('Vendor');
       expect(result.structuredContent).toMatchObject({
         name: { data: { failures: [{ message: 'Billy API request failed.' }], errors: [{ message: 'Billy API request failed.' }] } },
@@ -165,7 +165,7 @@ describe('round 8', () => {
         policy: { enableWrites: true },
         fetchImpl: asContact(body),
       });
-      for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK' })]) {
+      for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
         expect(JSON.stringify(result)).not.toContain('Vendor');
         expect(JSON.stringify(result.structuredContent)).toContain('"message":"Billy API request failed."');
       }

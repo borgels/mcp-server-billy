@@ -80,7 +80,7 @@ describe('audit records', () => {
     await gw.callTool(`get_${LONG_KEY}`, { contactId: 'i1' }, metadata);
     await gw.callTool('get_contact', { [LONG_KEY]: 'x', contactId: 'i1' }, metadata);
     await gw.callTool('get_contact', { contactId: LONG_KEY }, metadata);
-    await gw.callTool('create_contact', { name: LONG_KEY, countryId: 'DK' }, metadata);
+    await gw.callTool('create_contact', { name: LONG_KEY, countryId: 'DK', paymentTermsDays: 8 }, metadata);
 
     expect(records.length).toBeGreaterThanOrEqual(5);
     const text = JSON.stringify(records);
@@ -109,11 +109,11 @@ describe('call scopes', () => {
     await held.started;
     expect(held.keys).toEqual([KEY_A]);
     expect((await b.callTool('get_contact', { contactId: 'i1' }, { requestId: 'b1' })).isError).toBeUndefined();
-    expect((await b.callTool('create_contact', { name: 'n', countryId: 'DK' }, { requestId: 'b2' })).isError).toBeUndefined();
+    expect((await b.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { requestId: 'b2' })).isError).toBeUndefined();
     held.release();
     expect((await pendingA).isError).toBeUndefined();
     // After resuming, A still cannot write: its own policy, not B's.
-    expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK' }, { requestId: 'a2' })).isError).toBe(true);
+    expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { requestId: 'a2' })).isError).toBe(true);
 
     expect(sinkA.filter(r => r.requestId === 'a').map(r => r.action)).toEqual(['start', 'finish']);
     expect(new Set(sinkA.map(r => r.requestId))).toEqual(new Set(['a', 'a2']));
@@ -136,12 +136,12 @@ describe('call scopes', () => {
         audit: record => {
           sinkA.push(record);
           if (record.action === 'start' && nested.length === 0) {
-            nested.push(b.callTool('create_contact', { name: 'n', countryId: 'DK' }, { requestId: 'b' }));
+            nested.push(b.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { requestId: 'b' }));
           }
         },
       },
     });
-    expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK' }, { requestId: 'a' })).isError).toBeUndefined();
+    expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { requestId: 'a' })).isError).toBeUndefined();
     const fromInside = await nested[0]!;
     expect(fromInside.isError).toBe(true);
     expect(texts(fromInside).join(' ')).toMatch(/BILLY_ENABLE_WRITES/);
@@ -157,11 +157,11 @@ describe('call scopes', () => {
     const b = createBillyGateway({ accessToken: KEY_B, baseUrl: BASE, fetchImpl: fetchB as unknown as typeof fetch, policy: {} });
     let fromInside: { isError?: boolean } | undefined;
     const fetchA = (async () => {
-      fromInside = await b.callTool('create_contact', { name: 'n', countryId: 'DK' });
+      fromInside = await b.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 });
       return json({ contacts: [{ id: 'new' }] });
     }) as unknown as typeof fetch;
     const a = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: fetchA });
-    expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK' })).isError).toBeUndefined();
+    expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })).isError).toBeUndefined();
     expect(fromInside?.isError).toBe(true);
     expect(fetchB).not.toHaveBeenCalled();
   });
@@ -214,7 +214,7 @@ describe('call scopes', () => {
       },
     });
     expect((await gw.callTool('get_contact', { contactId: 'i1' })).isError).toBeUndefined();
-    const write = await gw.callTool('create_contact', { name: 'n', countryId: 'DK' });
+    const write = await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 });
     expect(write.isError).toBe(true);
     expect(fetchImpl.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'POST')).toEqual([]);
   });
@@ -227,7 +227,7 @@ describe('call scopes', () => {
       policy: { disabledTools: ['get_contact'] },
     });
     const disabled = texts(await gw.callTool('get_contact', { contactId: 'i1' })).join(' ');
-    const write = texts(await gw.callTool('create_contact', { name: 'n', countryId: 'DK' })).join(' ');
+    const write = texts(await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })).join(' ');
     for (const text of [disabled, write]) {
       expect(text).not.toMatch(/BILLY_/);
       expect(text).toMatch(/host/);

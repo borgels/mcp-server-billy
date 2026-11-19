@@ -27,13 +27,14 @@ function stub(key: string): typeof fetch {
     const path = (String(input).split('?')[0] ?? '').slice(BASE.length);
     switch (path) {
       case '/contacts/numbers':
-        return json({ contact: { name: { echo: Number(key), nested: { n: [Number(key.slice(1, 7)), Number(`${key}9`)] }, ok: true, count: 3 } } });
+        return json({ contact: { id: 'x', name: { echo: Number(key), nested: { n: [Number(key.slice(1, 7)), Number(`${key}9`)] }, ok: true, count: 3 } } });
       case '/contacts/body-fails':
         // The vendor's text and a piece of the key shorter than six characters.
         return failingBody(`Vendor diagnostic ${key.slice(0, 5)}`);
       case '/contacts/nested':
         return json({
           contact: {
+            id: 'x',
             name: {
               metadata: { status: 401, error: `Vendor diagnostic ${key}` },
               failures: [{ status: 403, error: 'Vendor detail' }, { error: 'Vendor text' }],
@@ -41,7 +42,7 @@ function stub(key: string): typeof fetch {
           },
         });
       case '/contacts/deep':
-        return new Response(`{"contact":{"name":${'['.repeat(DEEP)}1${']'.repeat(DEEP)}}}`, {
+        return new Response(`{"contact":{"id":"x","name":${'['.repeat(DEEP)}1${']'.repeat(DEEP)}}}`, {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -59,6 +60,7 @@ describe('the threat model, through callTool', () => {
     const result = await gw.callTool('get_contact', { contactId: 'numbers' });
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent).toEqual({
+      id: 'x',
       name: { echo: '‹redacted›', nested: { n: ['‹redacted›', '‹redacted›'] }, ok: true, count: 3 },
     });
     const serialised = JSON.stringify(result);
@@ -83,6 +85,7 @@ describe('the threat model, through callTool', () => {
     const gw = createBillyGateway({ accessToken: KEY, baseUrl: BASE, fetchImpl: stub(KEY), maxAttempts: 1 });
     const result = await gw.callTool('get_contact', { contactId: 'nested' });
     expect(result.structuredContent).toEqual({
+      id: 'x',
       name: {
         metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
         failures: [{ status: 403, message: 'Billy API request failed with HTTP 403' }, { message: 'Billy API request failed.' }],
@@ -134,10 +137,10 @@ describe('round 5 of the threat model, through callTool', () => {
       baseUrl: BASE,
       maxAttempts: 1,
       fetchImpl: async (_input, init) =>
-        init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { name: body } }),
+        init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { id: 'x', name: body } }),
       policy: { enableWrites: true },
     });
-    for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK' })]) {
+    for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
       expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
       expect((result.structuredContent as { name: unknown }).name).toEqual({
         metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
@@ -180,7 +183,7 @@ describe('round 5 of the threat model, through callTool', () => {
         accessToken: KEY,
         baseUrl: BASE,
         maxAttempts: 1,
-        fetchImpl: async () => json({ contact: { name: 'ok' } }),
+        fetchImpl: async () => json({ contact: { id: 'x', name: 'ok' } }),
         policy: {
           audit: () => {
             throw new Error(`sink failed for ${KEY}`);
@@ -238,6 +241,7 @@ describe('round 6 of the threat model', () => {
       fetchImpl: async () =>
         json({
           contact: {
+            id: 'x',
             name: {
               failures: [{ status: 403, message: 'Vendor diagnostic' }],
               metadata: { status: 401, error: null, message: 'Vendor diagnostic' },
@@ -249,6 +253,7 @@ describe('round 6 of the threat model', () => {
     });
     const result = await gw.callTool('get_contact', { contactId: 'x' });
     expect(result.structuredContent).toEqual({
+      id: 'x',
       name: {
         failures: [{ status: 403, message: 'Billy API request failed with HTTP 403' }],
         metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },

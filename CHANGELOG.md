@@ -31,5 +31,11 @@ documentation (https://www.billy.dk/api, API v2).
   values holding the token); exact host match; answers without the
   documented root key or changed record are errors; a draft invoice takes
   currency and payment terms explicitly.
+- After the second review: payment registrations are serialised per company
+  (its Billy id from `GET /organization`) and document, whatever token or
+  host the call uses, and the document must carry that company id; a bill
+  must have type `bill` and credit no other bill; records must have an id and
+  a list with an invalid entry is refused whole; `create_contact` requires
+  `paymentTermsDays`.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.
