@@ -406,14 +406,17 @@ export async function listProducts(
   input: { query?: string; includeArchived?: boolean; limit?: number },
 ): Promise<Json> {
   const { records, complete } = await scanAll(client, '/products', 'products', PRODUCT_FIELDS, { include: 'product.prices:embed' });
-  const matches = records.filter(
-    product =>
+  // Every product is shaped, its embedded prices included, before it is searched, filtered or cut at the limit:
+  // an invalid price on a product that is not shown refuses the answer too.
+  const shaped = records.map(product => ({ product, row: shapeProduct(product) }));
+  const matches = shaped.filter(
+    ({ product }) =>
       (input.includeArchived || product.isArchived !== true) &&
       textMatches(product, ['name', 'productNo', 'description'], input.query),
   );
   const limit = input.limit ?? 100;
   return {
-    products: matches.slice(0, limit).map(shapeProduct),
+    products: matches.slice(0, limit).map(({ row }) => row),
     matched: matches.length,
     shown: Math.min(limit, matches.length),
     complete,

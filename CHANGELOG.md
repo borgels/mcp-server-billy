@@ -50,7 +50,8 @@ documentation (https://www.billy.dk/api, API v2).
 - After the fifth review: the pseudonym key is at least 32 characters or
   bytes, admitted like the access token, and known to the error guard before
   anything is validated; integer fields must be whole numbers; records read
-  to the end are checked before they are filtered; record ids are logged in
+  to the end (products with their prices) are checked before they are
+  filtered or cut at the limit; record ids are logged in
   the audit only as pseudonyms.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.

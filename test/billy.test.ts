@@ -829,3 +829,25 @@ describe('after review 5: answers are checked before they are filtered', () => {
     expect((records[0]?.target as Record<string, unknown>).contactId).toBe((records.at(-1)?.target as Record<string, unknown>).contactId);
   });
 });
+
+describe('after review 6', () => {
+  const page = { meta: { paging: { page: 1, pageCount: 1 } } };
+  const products = [
+    { id: 'p1', name: 'Kop', prices: [{ currencyId: 'DKK', unitPrice: 49 }] },
+    { id: 'p2', name: 'Krus', prices: [null] },
+    { id: 'p3', name: 'Tallerken', isArchived: true, prices: { bad: true } },
+  ];
+
+  it('refuses a product list in which a product that is not shown has an invalid price', async () => {
+    for (const [label, list, input] of [
+      ['search', products.slice(0, 2), { query: 'Kop' }],
+      ['limit 1', products.slice(0, 2), { limit: 1 }],
+      ['archived', [products[0], products[2]], {}],
+    ] as Array<[string, unknown[], GatewayJsonObject]>) {
+      const result = await call(billy({ 'GET /products': { products: list, ...page } }).gw, 'list_products', input);
+      expect(result.isError, label).toBe(true);
+    }
+    const ok = await call(billy({ 'GET /products': { products: products.slice(0, 1), ...page } }).gw, 'list_products', { limit: 1 });
+    expect(ok.structuredContent).toMatchObject({ products: [{ id: 'p1', prices: [{ currencyId: 'DKK', unitPrice: 49 }] }], complete: true });
+  });
+});
