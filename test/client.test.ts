@@ -1,8 +1,8 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { API_KEY_HEADER, ExampleClient } from '../src/example/client.js';
-import { ExampleHttpError, parseRetryAfterMs, redactSecrets, SecretRedactor } from '../src/errors.js';
+import { API_KEY_HEADER, BillyClient } from '../src/billy/client.js';
+import { BillyHttpError, parseRetryAfterMs, redactSecrets, SecretRedactor } from '../src/errors.js';
 import { USER_AGENT } from '../src/version.js';
 
 const originalEnv = { ...process.env };
@@ -11,7 +11,7 @@ afterEach(() => {
   process.env = { ...originalEnv };
 });
 
-const BASE = 'https://api.vendor.test/v1';
+const BASE = 'https://api.billysbilling.com/v2';
 
 type Handler = (url: string, init?: RequestInit) => Response | unknown | Promise<Response | unknown>;
 
@@ -41,12 +41,12 @@ function headersOf(init?: RequestInit): Record<string, string> {
 
 const noSleep = vi.fn(async (_ms: number) => undefined);
 
-function makeClient(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<typeof ExampleClient>[0]> = {}) {
-  return new ExampleClient({ apiKey: 'k', baseUrl: BASE, fetchImpl, sleep: noSleep, ...extra });
+function makeClient(fetchImpl: typeof fetch, extra: Partial<ConstructorParameters<typeof BillyClient>[0]> = {}) {
+  return new BillyClient({ accessToken: 'k', baseUrl: BASE, fetchImpl, sleep: noSleep, ...extra });
 }
 
-describe('ExampleClient', () => {
-  it('sends the API key and User-Agent headers and never follows redirects', async () => {
+describe('BillyClient', () => {
+  it('sends the access token and User-Agent headers and never follows redirects', async () => {
     let seenUrl = '';
     let seenInit: RequestInit | undefined;
     const fetchImpl = makeFetch((url, init) => {
@@ -55,39 +55,60 @@ describe('ExampleClient', () => {
       return { id: '1' };
     });
 
-    await new ExampleClient({ apiKey: 'secret-key', baseUrl: `${BASE}/`, fetchImpl }).get('/items/1', { q: 'x' });
+    await new BillyClient({ accessToken: 'secret-key', baseUrl: `${BASE}/`, fetchImpl }).get('/contacts/1', { q: 'x' });
 
-    expect(seenUrl).toBe(`${BASE}/items/1?q=x`);
+    expect(seenUrl).toBe(`${BASE}/contacts/1?q=x`);
     expect(headersOf(seenInit)[API_KEY_HEADER]).toBe('secret-key');
     expect(headersOf(seenInit)['User-Agent']).toBe(USER_AGENT);
     expect(seenInit?.redirect).toBe('manual');
   });
 
-  it('throws before sending anything when the API key or base URL is missing', async () => {
+  it('throws before sending anything when the access token is missing, and uses the documented endpoint by default', async () => {
     const fetchImpl = makeFetch(() => ({}));
-    delete process.env.EXAMPLE_API_KEY;
-    delete process.env.EXAMPLE_BASE_URL;
+    delete process.env.BILLY_ACCESS_TOKEN;
+    delete process.env.BILLY_BASE_URL;
 
-    await expect(new ExampleClient({ baseUrl: BASE, fetchImpl }).get('/x')).rejects.toThrow('EXAMPLE_API_KEY');
-    await expect(new ExampleClient({ apiKey: 'k', fetchImpl }).get('/x')).rejects.toThrow('EXAMPLE_BASE_URL');
+    await expect(new BillyClient({ baseUrl: BASE, fetchImpl }).get('/x')).rejects.toThrow('BILLY_ACCESS_TOKEN');
     expect(fetchImpl).not.toHaveBeenCalled();
+    expect(new BillyClient({ accessToken: 'k', fetchImpl }).baseUrl).toBe('https://api.billysbilling.com/v2');
+  });
+
+  it('pins the token to the Billy hosts', () => {
+    delete process.env.BILLY_ALLOW_CUSTOM_BASE_URL;
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'https://api.billy.dk/v2' })).not.toThrow();
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'https://api.billysbilling.com.evil.test/v2' })).toThrow(/must be on/);
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'https://evil.test/v2' })).toThrow(/must be on/);
+  });
+
+  it('sends only the writes on its fixed list, and never a DELETE', async () => {
+    const fetchImpl = makeFetch(() => jsonResponse({ contacts: [] }, 200));
+    const client = makeClient(fetchImpl);
+    await expect(client.post('/organization', {})).rejects.toThrow('Refused');
+    await expect(client.put('/accounts/a1', {})).rejects.toThrow('Refused');
+    await expect(client.put('/organization', {})).rejects.toThrow('Refused');
+    await expect(client.post('/invoices/i1/emails', {})).rejects.toThrow('Refused');
+    await expect(client.post('/invoiceDeliveries', {})).rejects.toThrow('Refused');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(client.post('/contacts', {})).resolves.toEqual({ contacts: [] });
+    await expect(client.put('/contacts/c1', {})).resolves.toEqual({ contacts: [] });
+    expect('delete' in client).toBe(false);
   });
 
   it('refuses unsafe base URLs without echoing credentials', () => {
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://api.vendor.test' })).toThrow('https://');
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'not a url' })).toThrow('not a valid URL');
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://127.0.0.1:8080/api' })).not.toThrow();
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://localhost:8080/api' })).not.toThrow();
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'http://api.vendor.test' })).toThrow('https://');
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'not a url' })).toThrow('not a valid URL');
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'http://127.0.0.1:8080/api' })).not.toThrow();
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'http://localhost:8080/api' })).not.toThrow();
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'http://[::1]:8080/api' })).not.toThrow();
 
     for (const baseUrl of [
       'https://user:hunter2@api.vendor.test/v1',
-      'https://api.vendor.test/v1?x=1',
-      'https://api.vendor.test/v1#frag',
+      'https://api.billysbilling.com/v2?x=1',
+      'https://api.billysbilling.com/v2#frag',
     ]) {
       let message = '';
       try {
-        new ExampleClient({ apiKey: 'k', baseUrl });
+        new BillyClient({ accessToken: 'k', baseUrl });
       } catch (error) {
         message = (error as Error).message;
       }
@@ -97,24 +118,25 @@ describe('ExampleClient', () => {
   });
 
   it('validates numeric environment variables and options instead of producing NaN', () => {
-    process.env.EXAMPLE_TIMEOUT_MS = '30s';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_TIMEOUT_MS');
-    process.env.EXAMPLE_TIMEOUT_MS = '3000000000';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_TIMEOUT_MS');
-    delete process.env.EXAMPLE_TIMEOUT_MS;
-    process.env.EXAMPLE_MAX_CONCURRENCY = 'many';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_MAX_CONCURRENCY');
-    delete process.env.EXAMPLE_MAX_CONCURRENCY;
-    process.env.EXAMPLE_MAX_RESPONSE_BYTES = '10MB';
-    expect(() => new ExampleClient({ apiKey: 'k' })).toThrow('EXAMPLE_MAX_RESPONSE_BYTES');
-    delete process.env.EXAMPLE_MAX_RESPONSE_BYTES;
-    process.env.EXAMPLE_ALLOW_CUSTOM_BASE_URL = 'perhaps';
-    expect(() => new ExampleClient({ apiKey: 'k', baseUrl: BASE })).toThrow('EXAMPLE_ALLOW_CUSTOM_BASE_URL');
+    process.env.BILLY_TIMEOUT_MS = '30s';
+    expect(() => new BillyClient({ accessToken: 'k' })).toThrow('BILLY_TIMEOUT_MS');
+    process.env.BILLY_TIMEOUT_MS = '3000000000';
+    expect(() => new BillyClient({ accessToken: 'k' })).toThrow('BILLY_TIMEOUT_MS');
+    delete process.env.BILLY_TIMEOUT_MS;
+    process.env.BILLY_MAX_CONCURRENCY = 'many';
+    expect(() => new BillyClient({ accessToken: 'k' })).toThrow('BILLY_MAX_CONCURRENCY');
+    delete process.env.BILLY_MAX_CONCURRENCY;
+    process.env.BILLY_MAX_RESPONSE_BYTES = '10MB';
+    expect(() => new BillyClient({ accessToken: 'k' })).toThrow('BILLY_MAX_RESPONSE_BYTES');
+    delete process.env.BILLY_MAX_RESPONSE_BYTES;
+    process.env.BILLY_ALLOW_CUSTOM_BASE_URL = 'perhaps';
+    expect(() => new BillyClient({ accessToken: 'k', baseUrl: BASE })).toThrow('BILLY_ALLOW_CUSTOM_BASE_URL');
+    delete process.env.BILLY_ALLOW_CUSTOM_BASE_URL;
 
-    expect(() => new ExampleClient({ apiKey: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
-    expect(() => new ExampleClient({ apiKey: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
-    expect(() => new ExampleClient({ apiKey: 'k', timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
-    expect(() => new ExampleClient({ apiKey: 'k', maxAttempts: 0 })).toThrow('maxAttempts');
+    expect(() => new BillyClient({ accessToken: 'k', maxConcurrency: 0 })).toThrow('maxConcurrency');
+    expect(() => new BillyClient({ accessToken: 'k', maxConcurrency: Number.NaN })).toThrow('maxConcurrency');
+    expect(() => new BillyClient({ accessToken: 'k', timeoutMs: 2 ** 31 })).toThrow('timeoutMs');
+    expect(() => new BillyClient({ accessToken: 'k', maxAttempts: 0 })).toThrow('maxAttempts');
   });
 });
 
@@ -123,10 +145,10 @@ describe('error handling', () => {
     const fetchImpl = makeFetch(() => jsonResponse({ code: 'invalid_key', message: 'Unrecognized key' }, 401));
     const error = await makeClient(fetchImpl).get('/x').catch((e: unknown) => e);
 
-    expect(error).toBeInstanceOf(ExampleHttpError);
-    expect((error as ExampleHttpError).status).toBe(401);
+    expect(error).toBeInstanceOf(BillyHttpError);
+    expect((error as BillyHttpError).status).toBe(401);
     expect((error as Error).message).toContain('HTTP 401');
-    expect((error as Error).message).toContain('EXAMPLE_API_KEY');
+    expect((error as Error).message).toContain('Settings -> Access tokens');
     expect((error as Error).message).not.toContain('Unrecognized key');
     expect((error as Error).message).not.toContain('invalid_key');
   });
@@ -136,8 +158,8 @@ describe('error handling', () => {
     const fetchImpl = makeFetch(() => new Response(html, { status: 502, headers: { 'content-type': 'text/html' } }));
     const error = (await makeClient(fetchImpl, { maxAttempts: 1 })
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(error.message).toBe('Example API request failed with HTTP 502');
+      .catch((e: unknown) => e)) as BillyHttpError;
+    expect(error.message).toBe('Billy API request failed with HTTP 502');
   });
 
   it('reads at most 64 KB of an error body', async () => {
@@ -156,40 +178,40 @@ describe('error handling', () => {
     );
     const error = (await makeClient(fetchImpl)
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(error).toBeInstanceOf(ExampleHttpError);
+      .catch((e: unknown) => e)) as BillyHttpError;
+    expect(error).toBeInstanceOf(BillyHttpError);
     expect(pulled).toBeLessThan(10);
     expect(error.message.length).toBeLessThan(700);
   });
 
-  it('redacts the configured API key wherever it appears, before truncating', async () => {
-    const apiKey = 'live-key-0123456789abcdef';
+  it('redacts the configured access token wherever it appears, before truncating', async () => {
+    const accessToken = 'live-key-0123456789abcdef'; // gitleaks:allow (a test value, not a key)
     const respond = (body: string, type = 'text/plain') =>
-      new ExampleClient({
-        apiKey,
+      new BillyClient({
+        accessToken,
         baseUrl: BASE,
         fetchImpl: makeFetch(() => new Response(body, { status: 400, headers: { 'content-type': type } })),
       });
 
-    const echoed = (await respond(`proxy error: ${apiKey} and ${encodeURIComponent(apiKey)}`)
+    const echoed = (await respond(`proxy error: ${accessToken} and ${encodeURIComponent(accessToken)}`)
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(echoed.message).not.toContain(apiKey);
+      .catch((e: unknown) => e)) as BillyHttpError;
+    expect(echoed.message).not.toContain(accessToken);
     expect(echoed.message).not.toContain('proxy error');
 
-    const boundary = (await respond(`${'x'.repeat(490)}${apiKey}`)
+    const boundary = (await respond(`${'x'.repeat(490)}${accessToken}`)
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(boundary.message).not.toContain(apiKey.slice(0, 6));
+      .catch((e: unknown) => e)) as BillyHttpError;
+    expect(boundary.message).not.toContain(accessToken.slice(0, 6));
 
-    const nested = (await respond(JSON.stringify({ message: 'bad', nested: { echo: apiKey } }), 'application/json')
+    const nested = (await respond(JSON.stringify({ message: 'bad', nested: { echo: accessToken } }), 'application/json')
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(JSON.stringify(nested)).not.toContain(apiKey);
+      .catch((e: unknown) => e)) as BillyHttpError;
+    expect(JSON.stringify(nested)).not.toContain(accessToken);
 
     expect(redactSecrets('X-API-KEY: abc123')).not.toContain('abc123');
     expect(redactSecrets('Authorization: Bearer abc123')).not.toContain('abc123');
-    expect(redactSecrets('EXAMPLE_API_KEY=abc123')).not.toContain('abc123');
+    expect(redactSecrets('BILLY_ACCESS_TOKEN=abc123')).not.toContain('abc123');
   });
 
   it('redacts the configured key header by name', () => {
@@ -218,9 +240,9 @@ describe('error handling', () => {
   it('keeps query strings out of error URLs', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 400));
     const error = (await makeClient(fetchImpl)
-      .get('/items', { cursor: 'secret-cursor' })
-      .catch((e: unknown) => e)) as ExampleHttpError;
-    expect(error.url).toBe(`${BASE}/items`);
+      .get('/contacts', { cursor: 'secret-cursor' })
+      .catch((e: unknown) => e)) as BillyHttpError;
+    expect(error.url).toBe(`${BASE}/contacts`);
     expect(error.message).not.toContain('secret-cursor');
   });
 
@@ -243,7 +265,7 @@ describe('error handling', () => {
     const message = await makeClient(fetchImpl, { maxAttempts: 1 })
       .get('/x')
       .catch((e: Error) => e.message);
-    expect(message).toMatch(/Network error calling the Example API \(GET\) \(ENOTFOUND\)\./);
+    expect(message).toMatch(/Network error calling the Billy API \(GET\) \(ENOTFOUND\)\./);
     expect(message).not.toMatch(/odd|getaddrinfo/);
   });
 
@@ -279,13 +301,13 @@ describe('redirects', () => {
       () => new Response(null, { status: 302, headers: { location: 'https://other.vendor.test/v1/items?t=1' } }),
     );
     const message = await makeClient(fetchImpl)
-      .get('/items')
+      .get('/contacts')
       .catch((e: Error) => e.message);
     expect(message).toContain('redirect (HTTP 302) for GET');
-    expect(message).toContain('EXAMPLE_BASE_URL');
+    expect(message).toContain('BILLY_BASE_URL');
     // The Location is the vendor's text: never quoted.
     expect(message).not.toContain('other.vendor.test');
-    await expect(makeClient(fetchImpl).post('/items', {})).rejects.toThrow(/redirect/);
+    await expect(makeClient(fetchImpl).post('/contacts', {})).rejects.toThrow(/redirect/);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes('other.vendor.test'))).toBe(true);
   });
@@ -318,9 +340,9 @@ describe('retries and concurrency', () => {
     const sleep = vi.fn(async (_ms: number) => undefined);
     const error = (await makeClient(fetchImpl, { sleep })
       .get('/x')
-      .catch((e: unknown) => e)) as ExampleHttpError;
+      .catch((e: unknown) => e)) as BillyHttpError;
 
-    expect(error).toBeInstanceOf(ExampleHttpError);
+    expect(error).toBeInstanceOf(BillyHttpError);
     expect(error.message).toContain('retry-after=3600s');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
@@ -345,17 +367,17 @@ describe('retries and concurrency', () => {
     expect(permanent).toHaveBeenCalledTimes(1);
   });
 
-  it('never retries POST or PATCH', async () => {
+  it('never retries POST or PUT', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({}, 503));
     const client = makeClient(fetchImpl);
-    await expect(client.post('/x', {})).rejects.toBeInstanceOf(ExampleHttpError);
-    await expect(client.patch('/x', {})).rejects.toBeInstanceOf(ExampleHttpError);
+    await expect(client.post('/contacts', {})).rejects.toBeInstanceOf(BillyHttpError);
+    await expect(client.put('/contacts/c1', {})).rejects.toBeInstanceOf(BillyHttpError);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
 
     const failing = makeFetch(() => {
       throw new TypeError('fetch failed', { cause: Object.assign(new Error('reset'), { code: 'ECONNRESET' }) });
     });
-    await expect(makeClient(failing).post('/x', {})).rejects.toThrow('Network error');
+    await expect(makeClient(failing).post('/contacts', {})).rejects.toThrow('Network error');
     expect(failing).toHaveBeenCalledTimes(1);
   });
 
@@ -373,7 +395,7 @@ describe('retries and concurrency', () => {
     });
     const client = makeClient(fetchImpl, { maxConcurrency: 1 });
     await expect(client.get('/x')).rejects.toThrow('timed out');
-    await expect(client.get('/x')).rejects.toBeInstanceOf(ExampleHttpError);
+    await expect(client.get('/x')).rejects.toBeInstanceOf(BillyHttpError);
     await expect(client.get('/x')).resolves.toEqual({ ok: true });
   });
 
@@ -413,18 +435,18 @@ describe('against a local upstream (real sockets)', () => {
     const seen: Array<{ url?: string; key?: string }> = [];
     const base = await startUpstream((req, res) => {
       seen.push({ url: req.url, key: req.headers[API_KEY_HEADER.toLowerCase()] as string | undefined });
-      if (req.url === '/v1/items/1') {
+      if (req.url === '/v1/contacts/1') {
         res.writeHead(200, { 'content-type': 'application/json' }).end('{"id":"1"}');
         return;
       }
-      res.writeHead(302, { location: `${base}/items/1` }).end();
+      res.writeHead(302, { location: `${base}/contacts/1` }).end();
     });
-    const client = new ExampleClient({ apiKey: 'local-key-123456', baseUrl: base });
+    const client = new BillyClient({ accessToken: 'local-key-123456', baseUrl: base });
 
-    await expect(client.get('/items/1')).resolves.toEqual({ id: '1' });
+    await expect(client.get('/contacts/1')).resolves.toEqual({ id: '1' });
     await expect(client.get('/moved')).rejects.toThrow('redirects are not followed');
     expect(seen).toEqual([
-      { url: '/v1/items/1', key: 'local-key-123456' },
+      { url: '/v1/contacts/1', key: 'local-key-123456' },
       { url: '/v1/moved', key: 'local-key-123456' },
     ]);
   });
@@ -433,7 +455,7 @@ describe('against a local upstream (real sockets)', () => {
     const base = await startUpstream(() => {
       // never answers
     });
-    const client = new ExampleClient({ apiKey: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1 });
+    const client = new BillyClient({ accessToken: 'k', baseUrl: base, timeoutMs: 100, maxAttempts: 1 });
     await expect(client.get('/slow')).rejects.toThrow(/timed out after 100 ms/);
     upstream?.closeAllConnections();
   });

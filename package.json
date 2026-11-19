@@ -1,8 +1,8 @@
 {
-  "name": "mcp-server-example",
-  "version": "0.1.1",
-  "mcpName": "io.github.borgels/mcp-server-example",
-  "description": "Unofficial MCP server for the Example API.",
+  "name": "mcp-server-billy",
+  "version": "0.1.0",
+  "mcpName": "io.github.borgels/mcp-server-billy",
+  "description": "Unofficial MCP server for the Billy accounting API (Denmark): contacts, products, invoices, bills, accounts, postings and daybooks, with opt-in drafts, approval and payment registration.",
   "type": "module",
   "main": "./dist/transports/stdio.js",
   "exports": {
@@ -20,7 +20,7 @@
     ".env.example"
   ],
   "bin": {
-    "mcp-server-example": "./dist/transports/stdio.js"
+    "mcp-server-billy": "./dist/transports/stdio.js"
   },
   "scripts": {
     "build": "tsup src/transports/stdio.ts src/transports/http.ts src/gateway.ts --format esm --dts --clean --sourcemap",
@@ -33,12 +33,18 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/borgels/mcp-server-example.git"
+    "url": "git+https://github.com/borgels/mcp-server-billy.git"
   },
   "keywords": [
     "mcp",
     "model-context-protocol",
-    "example"
+    "billy",
+    "shine",
+    "accounting",
+    "bogføring",
+    "regnskab",
+    "invoices",
+    "denmark"
   ],
   "author": "",
   "license": "Apache-2.0",
@@ -46,9 +52,9 @@
     "node": ">=22"
   },
   "bugs": {
-    "url": "https://github.com/borgels/mcp-server-example/issues"
+    "url": "https://github.com/borgels/mcp-server-billy/issues"
   },
-  "homepage": "https://github.com/borgels/mcp-server-example#readme",
+  "homepage": "https://github.com/borgels/mcp-server-billy#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "zod": "^4.6.7"

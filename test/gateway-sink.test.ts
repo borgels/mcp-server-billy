@@ -1,7 +1,7 @@
 // The sink check (README, "Threat model"): nothing that leaves a gateway holds a piece of 6 characters of the key.
-// Every output is checked in its final form; the round-7 counterexamples and keys spliced from real outputs.
+// Every output is checked in its final form; the round-7 counterbillys and keys spliced from real outputs.
 import { describe, expect, it } from 'vitest';
-import { createExampleGateway } from '../src/gateway.js';
+import { createBillyGateway } from '../src/gateway.js';
 import { visibleTexts } from '../src/key-admission.js';
 import { BASE } from './helpers.js';
 
@@ -25,18 +25,18 @@ function leaked(key: string, outputs: unknown[]): string[] {
 
 const upstream: typeof fetch = async input => {
   const path = (String(input).split('?')[0] ?? '').slice(BASE.length);
-  if (path === '/items/i1') return json({ id: 'i1', name: 'Item one', status: 'open', riskLevel: 'low' });
-  if (path === '/items') return json({ id: 'i2', name: 'n' }, 201);
+  if (path === '/contacts/i1') return json({ id: 'i1', name: 'Item one', status: 'open', riskLevel: 'low' });
+  if (path === '/contacts') return json({ id: 'i2', name: 'n' }, 201);
   return json({ message: 'no stub' }, 404);
 };
 
 /** Every output of a normal session with this key, or the refusal when the key is not admitted. */
-async function outputs(apiKey: string): Promise<{ refused?: string; outputs: unknown[] }> {
+async function outputs(accessToken: string): Promise<{ refused?: string; outputs: unknown[] }> {
   const records: unknown[] = [];
-  let gw: ReturnType<typeof createExampleGateway>;
+  let gw: ReturnType<typeof createBillyGateway>;
   try {
-    gw = createExampleGateway({
-      apiKey,
+    gw = createBillyGateway({
+      accessToken,
       baseUrl: BASE,
       fetchImpl: upstream,
       maxAttempts: 1,
@@ -46,18 +46,18 @@ async function outputs(apiKey: string): Promise<{ refused?: string; outputs: unk
     return { refused: (error as Error).message, outputs: [(error as Error).message, (error as Error).name] };
   }
   const results = [
-    await gw.callTool('get_item', { itemId: 'i1' }, { caller: 'person-1', requestId: 'r1' }),
-    await gw.callTool('create_item', { name: 'n' }, { caller: 'person-1', requestId: 'r2' }),
-    await gw.callTool('get_item', { itemId: 'missing' }),
+    await gw.callTool('get_contact', { contactId: 'i1' }, { caller: 'person-1', requestId: 'r1' }),
+    await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { caller: 'person-1', requestId: 'r2' }),
+    await gw.callTool('get_contact', { contactId: 'missing' }),
     await gw.callTool('no_such_tool', {}),
-    await gw.callTool('get_item', { unknown: 1 }),
+    await gw.callTool('get_contact', { unknown: 1 }),
   ];
   return { outputs: [gw.tools, ...results, ...records] };
 }
 
 describe('the sink check', () => {
-  it('holds for the round-7 counterexamples', async () => {
-    for (const apiKey of [
+  it('holds for the round-7 counterbillys', async () => {
+    for (const accessToken of [
       'riskLevelQz7pX2vK9mWb',
       'Zq7pX2visError9mWb4TnR',
       'qz7":"staV8k2mP9',
@@ -65,20 +65,20 @@ describe('the sink check', () => {
       'x"ok":y-0123456789',
       'URI malformedQz7pX2vK9mWb\uD800',
     ]) {
-      const { refused, outputs: seen } = await outputs(apiKey);
-      if (refused !== undefined) expect(refused, apiKey).toMatch(/key was refused/);
-      expect(leaked(apiKey, seen), apiKey).toEqual([]);
+      const { refused, outputs: seen } = await outputs(accessToken);
+      if (refused !== undefined) expect(refused, accessToken).toMatch(/key was refused/);
+      expect(leaked(accessToken, seen), accessToken).toEqual([]);
     }
   });
 
   it('refuses a key that is not printable ASCII before anything is built from it', () => {
-    for (const apiKey of ['URI malformedQz7pX2vK9mWb\uD800', 'Zq7pX2vK9mWb4TnRé', 'Zq7pX2 vK9mWb4TnR8y']) {
-      expect(() => createExampleGateway({ apiKey, baseUrl: BASE }), apiKey).toThrow(/key was refused/);
+    for (const accessToken of ['URI malformedQz7pX2vK9mWb\uD800', 'Zq7pX2vK9mWb4TnRé', 'Zq7pX2 vK9mWb4TnR8y']) {
+      expect(() => createBillyGateway({ accessToken, baseUrl: BASE }), accessToken).toThrow(/key was refused/);
     }
   });
 
   it('refuses a key that shares a piece with the tool list', () => {
-    expect(() => createExampleGateway({ apiKey: 'riskLevelQz7pX2vK9mWb', baseUrl: BASE })).toThrow(/key was refused/);
+    expect(() => createBillyGateway({ accessToken: 'riskLevelQz7pX2vK9mWb', baseUrl: BASE })).toThrow(/key was refused/);
   });
 
   it('holds for keys spliced from the outputs of a normal session', async () => {
@@ -97,28 +97,34 @@ describe('the sink check', () => {
       const start = random(text.length - 5);
       const window = text.slice(start, start + 6);
       if (!/^[\x21-\x7E]{6}$/.test(window)) continue;
-      const apiKey = `${filler(6)}${window}${filler(6)}`;
-      const { refused, outputs: seen } = await outputs(apiKey);
+      const accessToken = `${filler(6)}${window}${filler(6)}`;
+      const { refused, outputs: seen } = await outputs(accessToken);
       if (refused === undefined) admitted += 1;
-      expect(leaked(apiKey, seen), apiKey).toEqual([]);
+      expect(leaked(accessToken, seen), accessToken).toEqual([]);
     }
     expect(admitted).toBeGreaterThan(0);
   });
 });
 
+/** The body as the name of a contact: what get_contact and create_contact pass on unchanged. */
+const asContact =
+  (body: unknown): typeof fetch =>
+  async (_input, init) =>
+    init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { id: 'x', name: body } });
+
 describe('failure texts', () => {
   it('replaces texts in failure lists of a successful answer, for reads and writes', async () => {
-    const gw = createExampleGateway({
-      apiKey: PLAIN,
+    const gw = createBillyGateway({
+      accessToken: PLAIN,
       baseUrl: BASE,
       maxAttempts: 1,
       policy: { enableWrites: true },
-      fetchImpl: async () => json({ data: { failures: ['Vendor diagnostic'], errors: ['Vendor diagnostic'] } }),
+      fetchImpl: asContact({ data: { failures: ['Vendor diagnostic'], errors: ['Vendor diagnostic'] } }),
     });
-    for (const result of [await gw.callTool('get_item', { itemId: 'x' }), await gw.callTool('create_item', { name: 'n' })]) {
+    for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
       expect(JSON.stringify(result)).not.toContain('Vendor');
       expect(result.structuredContent).toMatchObject({
-        data: { failures: [{ message: 'Example API request failed.' }], errors: [{ message: 'Example API request failed.' }] },
+        name: { data: { failures: [{ message: 'Billy API request failed.' }], errors: [{ message: 'Billy API request failed.' }] } },
       });
     }
   });
@@ -126,24 +132,24 @@ describe('failure texts', () => {
 
 describe('round 8', () => {
   it('throws construction errors in final form: no frames or paths in the stack, no cause', () => {
-    for (const [apiKey, baseUrl] of [
-      ['scratchpadQz7pX2vK9mWb', ''],
+    for (const [accessToken, baseUrl] of [
+      ['scratchpadQz7pX2vK9mWb', 'https://elsewhere.invalid/v2'],
       ['scratchpadQz7pX2vK9mWb', 'bad'],
       ['Zq7pX2-node:i-Wb4TnR', 'bad'],
       ['short', 'bad'],
     ] as const) {
       let caught: Error | undefined;
       try {
-        createExampleGateway({ apiKey, baseUrl });
+        createBillyGateway({ accessToken, baseUrl });
       } catch (error) {
         caught = error as Error;
       }
-      expect(caught, apiKey).toBeInstanceOf(Error);
+      expect(caught, accessToken).toBeInstanceOf(Error);
       const stack = String(caught!.stack);
       expect(stack).toBe(`${caught!.name}: ${caught!.message}`);
       expect(stack).not.toMatch(/\n\s+at /);
       expect((caught as { cause?: unknown }).cause).toBeUndefined();
-      expect(leaked(apiKey, [stack, caught!.message, caught!.name, caught])).toEqual([]);
+      expect(leaked(accessToken, [stack, caught!.message, caught!.name, caught])).toEqual([]);
     }
   });
 
@@ -152,16 +158,16 @@ describe('round 8', () => {
       { data: { failures: [{ reason: 'Vendor diagnostic' }], errors: [{ code: 'Vendor diagnostic' }] } },
       { failures: [{ code: 'Vendor diagnostic' }] },
     ]) {
-      const gw = createExampleGateway({
-        apiKey: PLAIN,
+      const gw = createBillyGateway({
+        accessToken: PLAIN,
         baseUrl: BASE,
         maxAttempts: 1,
         policy: { enableWrites: true },
-        fetchImpl: async () => json(body),
+        fetchImpl: asContact(body),
       });
-      for (const result of [await gw.callTool('get_item', { itemId: 'x' }), await gw.callTool('create_item', { name: 'n' })]) {
+      for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
         expect(JSON.stringify(result)).not.toContain('Vendor');
-        expect(JSON.stringify(result.structuredContent)).toContain('"message":"Example API request failed."');
+        expect(JSON.stringify(result.structuredContent)).toContain('"message":"Billy API request failed."');
       }
     }
   });
@@ -174,8 +180,8 @@ describe('round 8', () => {
       },
       async () => new Response(null, { status: 302, headers: { location: 'https://elsewhere.invalid/' } }),
     ] as Array<typeof fetch>) {
-      const gw = createExampleGateway({ apiKey: PLAIN, baseUrl: ADDRESS, allowCustomBaseUrl: true, maxAttempts: 1, fetchImpl });
-      const result = await gw.callTool('get_item', { itemId: 'x' });
+      const gw = createBillyGateway({ accessToken: PLAIN, baseUrl: ADDRESS, allowCustomBaseUrl: true, maxAttempts: 1, fetchImpl });
+      const result = await gw.callTool('get_contact', { contactId: 'x' });
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result)).not.toContain('vendor-name');
     }

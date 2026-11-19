@@ -4,18 +4,18 @@ import { join } from 'node:path';
 import { setFlagsFromString } from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { API_KEY_HEADER, ExampleClient } from '../src/example/client.js';
-import { createExampleGateway, exampleGatewayTools, exampleToolCatalog } from '../src/gateway.js';
-import { EXAMPLE_TOOLS } from '../src/tools/example.js';
+import { API_KEY_HEADER, BillyClient } from '../src/billy/client.js';
+import { createBillyGateway, billyGatewayTools, billyToolCatalog, type GatewayJsonObject } from '../src/gateway.js';
+import { BILLY_TOOLS } from '../src/tools/billy.js';
 import { BASE, auditLines, connect, stubFetch, texts } from './helpers.js';
 
 const originalEnv = { ...process.env };
 let dir: string;
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'example-mcp-'));
+  dir = mkdtempSync(join(tmpdir(), 'billy-mcp-'));
   for (const name of Object.keys(process.env)) {
-    if (name.startsWith('EXAMPLE_')) {
+    if (name.startsWith('BILLY_')) {
       delete process.env[name];
     }
   }
@@ -46,19 +46,18 @@ function headersOf(init?: RequestInit): Record<string, string> {
 }
 
 describe('explicit gateway credentials', () => {
-  it('requires apiKey and baseUrl and ignores the environment', () => {
-    process.env.EXAMPLE_API_KEY = ENV_KEY;
-    process.env.EXAMPLE_BASE_URL = BASE;
+  it('requires accessToken and ignores the environment', () => {
+    process.env.BILLY_ACCESS_TOKEN = ENV_KEY;
+    process.env.BILLY_BASE_URL = BASE;
 
-    expect(() => createExampleGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
-    expect(() => createExampleGateway({ apiKey: KEY_A } as never)).toThrow(/requires options\.baseUrl/);
-    expect(() => createExampleGateway({ apiKey: '  ', baseUrl: BASE })).toThrow(/requires options\.apiKey/);
-    expect(() => createExampleGateway(undefined as never)).toThrow(/requires options\.apiKey/);
+    expect(() => createBillyGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.accessToken/);
+    expect(() => createBillyGateway({ accessToken: '  ', baseUrl: BASE })).toThrow(/requires options\.accessToken/);
+    expect(() => createBillyGateway(undefined as never)).toThrow(/requires options\.accessToken/);
   });
 
   it('never reads credential variables from process.env, even when they are set', async () => {
     const reads = new Set<string>();
-    const env = { ...process.env, EXAMPLE_API_KEY: ENV_KEY, EXAMPLE_BASE_URL: BASE };
+    const env = { ...process.env, BILLY_ACCESS_TOKEN: ENV_KEY, BILLY_BASE_URL: BASE };
     process.env = new Proxy(env, {
       get(target, property, receiver) {
         if (typeof property === 'string') {
@@ -68,42 +67,42 @@ describe('explicit gateway credentials', () => {
       },
     });
 
-    expect(() => createExampleGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.apiKey/);
+    expect(() => createBillyGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.accessToken/);
 
-    const fetchImpl = stubFetch({ [`GET ${BASE}/items/i1`]: { body: { id: 'i1' } } });
-    const gw = createExampleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
-    const result = await gw.callTool('get_item', { itemId: 'i1' });
+    const fetchImpl = stubFetch({ [`GET ${BASE}/contacts/i1`]: { body: { contact: { id: 'i1' } } } });
+    const gw = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+    const result = await gw.callTool('get_contact', { contactId: 'i1' });
     expect(result.isError).toBeUndefined();
     expect(headersOf(fetchImpl.mock.calls[0]?.[1])[API_KEY_HEADER]).toBe(KEY_A);
 
-    expect(reads.has('EXAMPLE_API_KEY')).toBe(false);
-    expect(reads.has('EXAMPLE_BASE_URL')).toBe(false);
+    expect(reads.has('BILLY_ACCESS_TOKEN')).toBe(false);
+    expect(reads.has('BILLY_BASE_URL')).toBe(false);
   });
 
   it('still reads credentials from the environment in the standalone client', async () => {
-    process.env.EXAMPLE_API_KEY = ENV_KEY;
-    process.env.EXAMPLE_BASE_URL = BASE;
+    process.env.BILLY_ACCESS_TOKEN = ENV_KEY;
+    process.env.BILLY_BASE_URL = BASE;
     const fetchImpl = vi.fn(async () => Response.json({})) as unknown as typeof fetch & ReturnType<typeof vi.fn>;
-    await new ExampleClient({ fetchImpl }).get('/items/1');
+    await new BillyClient({ fetchImpl }).get('/contacts/1');
     expect(headersOf(fetchImpl.mock.calls[0]?.[1] as RequestInit)[API_KEY_HEADER]).toBe(ENV_KEY);
   });
 });
 
 describe('per-instance redaction', () => {
   it('redacts each instance’s own key in its tool results', async () => {
-    const a = createExampleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: echoingFetch(KEY_A) });
-    const b = createExampleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: echoingFetch(KEY_B) });
+    const a = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: echoingFetch(KEY_A) });
+    const b = createBillyGateway({ accessToken: KEY_B, baseUrl: BASE, fetchImpl: echoingFetch(KEY_B) });
 
-    const resultA = texts(await a.callTool('get_item', { itemId: 'i1' })).join(' ');
-    const resultB = texts(await b.callTool('get_item', { itemId: 'i1' })).join(' ');
+    const resultA = texts(await a.callTool('get_contact', { contactId: 'i1' })).join(' ');
+    const resultB = texts(await b.callTool('get_contact', { contactId: 'i1' })).join(' ');
     // The echoing error body is never read into the result; the key is not there in any form.
     expect(resultA).not.toContain(KEY_A);
     expect(resultB).not.toContain(KEY_B);
   });
 
   it('keeps redactors separate: an instance holds only its own secrets', () => {
-    const a = new ExampleClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
-    const b = new ExampleClient({ apiKey: KEY_B, baseUrl: BASE, credentialEnv: {} });
+    const a = new BillyClient({ accessToken: KEY_A, baseUrl: BASE, credentialEnv: {} });
+    const b = new BillyClient({ accessToken: KEY_B, baseUrl: BASE, credentialEnv: {} });
     expect(a.redactor.hasSecret(KEY_A)).toBe(true);
     expect(a.redactor.hasSecret(KEY_B)).toBe(false);
     expect(b.redactor.hasSecret(KEY_B)).toBe(true);
@@ -114,24 +113,24 @@ describe('per-instance redaction', () => {
 
   it('does not accumulate keys of earlier instances', () => {
     for (let index = 0; index < 200; index += 1) {
-      createExampleGateway({ apiKey: `short-lived-key-${index}`, baseUrl: BASE });
+      createBillyGateway({ accessToken: `short-lived-key-${index}`, baseUrl: BASE });
     }
-    const fresh = new ExampleClient({ apiKey: KEY_A, baseUrl: BASE, credentialEnv: {} });
+    const fresh = new BillyClient({ accessToken: KEY_A, baseUrl: BASE, credentialEnv: {} });
     expect(fresh.redactor.redact('short-lived-key-7')).toBe('short-lived-key-7');
   });
 
   it('redacts audit records with the key of the instance that ran the call', async () => {
-    process.env.EXAMPLE_AUDIT_LOG = join(dir, 'audit.jsonl');
+    process.env.BILLY_AUDIT_LOG = join(dir, 'audit.jsonl');
     const failing = (key: string) =>
       vi.fn(async () => {
         throw new TypeError(`connection refused while sending ${key}`);
       }) as unknown as typeof fetch;
-    const a = createExampleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: failing(KEY_A), maxAttempts: 1 });
-    const b = createExampleGateway({ apiKey: KEY_B, baseUrl: BASE, fetchImpl: failing(KEY_B), maxAttempts: 1 });
-    await a.callTool('get_item', { itemId: 'i1' }, { requestId: 'a' });
-    await b.callTool('get_item', { itemId: 'i1' }, { requestId: 'b' });
+    const a = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: failing(KEY_A), maxAttempts: 1 });
+    const b = createBillyGateway({ accessToken: KEY_B, baseUrl: BASE, fetchImpl: failing(KEY_B), maxAttempts: 1 });
+    await a.callTool('get_contact', { contactId: 'i1' }, { requestId: 'a' });
+    await b.callTool('get_contact', { contactId: 'i1' }, { requestId: 'b' });
 
-    const errors = auditLines(process.env.EXAMPLE_AUDIT_LOG).filter(line => line.action === 'error');
+    const errors = auditLines(process.env.BILLY_AUDIT_LOG).filter(line => line.action === 'error');
     expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
     const log = JSON.stringify(errors);
     expect(log).not.toContain(KEY_A);
@@ -139,14 +138,14 @@ describe('per-instance redaction', () => {
   });
 
   it('redacts with the server client’s key on the MCP path', async () => {
-    const tool = EXAMPLE_TOOLS.find(t => t.name === 'example_get_item')!;
+    const tool = BILLY_TOOLS.find(t => t.name === 'billy_get_contact')!;
     const original = tool.handler;
     tool.handler = async () => {
       throw new Error('failed with test-api-key');
     };
     try {
       const { mcpClient } = await connect();
-      const result = await mcpClient.callTool({ name: 'example_get_item', arguments: { itemId: 'i1' } });
+      const result = await mcpClient.callTool({ name: 'billy_get_contact', arguments: { contactId: 'i1' } });
       expect(texts(result).join(' ')).not.toContain('test-api-key');
     } finally {
       tool.handler = original;
@@ -156,8 +155,8 @@ describe('per-instance redaction', () => {
   it('lets a dropped instance and its key be garbage collected', async () => {
     setFlagsFromString('--expose-gc');
     const gc = runInNewContext('gc') as () => void;
-    let gateway: ReturnType<typeof createExampleGateway> | undefined = createExampleGateway({
-      apiKey: fakeKey('collectable'),
+    let gateway: ReturnType<typeof createBillyGateway> | undefined = createBillyGateway({
+      accessToken: fakeKey('collectable'),
       baseUrl: BASE,
     });
     const ref = new WeakRef(gateway);
@@ -171,19 +170,58 @@ describe('per-instance redaction', () => {
 });
 
 /** Sample input per tool, used to check each tool's declared upstream requests. */
-const SAMPLE_INPUTS: Record<string, Record<string, string>> = {
-  get_item: { itemId: 'i1' },
-  create_item: { name: 'New item' },
+const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
+  check_connection: {},
+  get_organization: {},
+  list_contacts: { kind: 'customer', query: 'a' },
+  get_contact: { contactId: 'c1' },
+  list_products: {},
+  get_product: { productId: 'p1' },
+  list_invoices: { state: 'approved', isPaid: false },
+  get_invoice: { invoiceId: 'i1' },
+  list_bills: { isPaid: false },
+  get_bill: { billId: 'b1' },
+  list_accounts: { bankAccountsOnly: true },
+  list_postings: { accountId: 'a1' },
+  list_daybooks: {},
+  list_daybook_transactions: { state: 'draft' },
+  list_tax_rates: {},
+  create_contact: { name: 'New contact', countryId: 'DK', isCustomer: true, paymentTermsDays: 8 },
+  update_contact: { contactId: 'c1', phone: '12345678' },
+  create_product: { name: 'New product', prices: [{ currencyId: 'DKK', unitPrice: 100 }] },
+  update_product: { productId: 'p1', name: 'Renamed' },
+  create_draft_invoice: { contactId: 'c1', entryDate: '2026-11-19', currencyId: 'DKK', paymentTermsDays: 8, lines: [{ productId: 'p1', unitPrice: 100 }] },
+  approve_invoice: { invoiceId: 'i1' },
+  register_payment: { billId: 'b1', cashAccountId: 'a1', amount: 100, entryDate: '2026-11-19' },
+  create_daybook_transaction: { entryDate: '2026-11-19', lines: [{ accountId: 'a1', amount: 10, side: 'debit' }] },
 };
+
+/** Answers that let every tool run to its end: a draft invoice, an approved unpaid bill and a payment account. */
+async function catalogFetch(input: string | URL | Request): Promise<Response> {
+  const path = new URL(String(input)).pathname;
+  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft' }, invoices: [{ id: 'i1' }] });
+  if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', organizationId: 'x1', type: 'bill', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
+  if (path.includes('/accounts/')) return Response.json({ account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } });
+  // Every list and record root key the tools read, and one changed record for every write.
+  const roots = ['organization', 'contact', 'product'];
+  const lists = ['contacts', 'products', 'invoices', 'bills', 'accounts', 'postings', 'daybooks', 'daybookTransactions', 'taxRates', 'bankPayments'];
+  return Response.json({
+    ...Object.fromEntries(roots.map(key => [key, { id: 'x1' }])),
+    ...Object.fromEntries(lists.map(key => [key, [{ id: 'x1' }]])),
+  });
+}
 
 describe('tool catalog', () => {
   it('lists every registered tool, matching the gateway definitions', async () => {
-    expect(exampleToolCatalog.map(entry => entry.name)).toEqual(exampleGatewayTools.map(tool => tool.name));
-    for (const entry of exampleToolCatalog) {
-      const { upstream, broad, ...definition } = entry;
+    expect(billyToolCatalog.map(entry => entry.name)).toEqual(billyGatewayTools.map(tool => tool.name));
+    for (const entry of billyToolCatalog) {
+      const { upstream, broad, requiresConfirmation, change, ...definition } = entry;
+      expect(typeof requiresConfirmation).toBe('boolean');
+      expect(change === undefined).toBe(entry.riskLevel === 'read');
+      if (requiresConfirmation) expect(entry.riskLevel).toBe('write');
       expect(typeof broad).toBe('boolean');
       if (broad) expect(entry.riskLevel).toBe('read');
-      expect(definition).toEqual(exampleGatewayTools.find(tool => tool.name === entry.name));
+      expect(definition).toEqual(billyGatewayTools.find(tool => tool.name === entry.name));
       expect(upstream.length).toBeGreaterThan(0);
       for (const operation of upstream) {
         expect(operation.access === 'read' ? operation.method === 'GET' : true).toBe(true);
@@ -196,10 +234,10 @@ describe('tool catalog', () => {
     const { mcpClient } = await connect();
     const { tools } = await mcpClient.listTools();
     expect(tools.map(tool => tool.name).sort()).toEqual(
-      exampleToolCatalog.map(entry => `example_${entry.name}`).sort(),
+      billyToolCatalog.map(entry => `billy_${entry.name}`).sort(),
     );
     for (const tool of tools) {
-      const entry = exampleToolCatalog.find(e => `example_${e.name}` === tool.name)!;
+      const entry = billyToolCatalog.find(e => `billy_${e.name}` === tool.name)!;
       expect(entry.title).toBe(tool.title);
       expect(entry.description).toBe(tool.description);
       expect(Object.keys(entry.inputSchema.properties as object).sort()).toEqual(
@@ -209,32 +247,32 @@ describe('tool catalog', () => {
   });
 
   it('is deeply frozen', () => {
-    expect(Object.isFrozen(exampleToolCatalog)).toBe(true);
+    expect(Object.isFrozen(billyToolCatalog)).toBe(true);
     const visit = (value: unknown) => {
       if (typeof value === 'object' && value !== null) {
         expect(Object.isFrozen(value)).toBe(true);
         Object.values(value).forEach(visit);
       }
     };
-    visit(exampleToolCatalog);
+    visit(billyToolCatalog);
     expect(() => {
-      (exampleToolCatalog[0] as { name: string }).name = 'changed';
+      (billyToolCatalog[0] as { name: string }).name = 'changed';
     }).toThrow(TypeError);
   });
 
   it('declares exactly the upstream requests each tool makes', async () => {
-    process.env.EXAMPLE_ENABLE_WRITES = 'true';
-    for (const entry of exampleToolCatalog) {
+    process.env.BILLY_ENABLE_WRITES = 'true';
+    for (const entry of billyToolCatalog) {
       const input = SAMPLE_INPUTS[entry.name];
       expect(input, `sample input for ${entry.name}`).toBeDefined();
-      const fetchImpl = vi.fn(async () => Response.json({ ok: true }));
-      const gw = createExampleGateway({ apiKey: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
+      const fetchImpl = vi.fn(catalogFetch);
+      const gw = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
       const result = await gw.callTool(entry.name, input!);
       expect(result.isError, texts(result).join(' ')).toBeUndefined();
 
       const declared = entry.upstream.map(op => ({
         method: op.method,
-        path: op.path.replace(/\{(\w+)\}/g, (_, name: string) => encodeURIComponent(input![name] ?? '')),
+        path: op.path.replace(/\{(\w+)\}/g, (_, name: string) => encodeURIComponent(String(input![name] ?? ''))),
       }));
       const made = (fetchImpl.mock.calls as unknown as Array<[string, RequestInit]>).map(([url, init]) => ({
         method: init.method,
