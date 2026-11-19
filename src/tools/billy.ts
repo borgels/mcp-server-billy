@@ -40,7 +40,7 @@ import {
   updateContact,
   updateProduct,
 } from '../billy/resources.js';
-import { checkInputPolicy, checkToolPolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../billy/policy.js';
+import { checkInputPolicy, checkToolPolicy, currentInstancePolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../billy/policy.js';
 import {
   COUNTRY_PATTERN,
   CURRENCY_PATTERN,
@@ -685,7 +685,7 @@ export function pseudonym(value: string, key?: string | Uint8Array): string {
   return `sha256:${createHash('sha256').update(value).digest('hex').slice(0, 16)}`;
 }
 
-const KIND_VALUES = /^[A-Za-z_]{1,20}$/;
+const KIND_VALUES = /^[A-Za-z][A-Za-z_-]{0,19}$/;
 
 /**
  * The value of one log field when it has exactly the field's type; otherwise
@@ -786,12 +786,23 @@ function contextString(value: unknown, max: number): string | undefined {
   return trimmed ? trimmed.slice(0, max) : undefined;
 }
 
-/** Normalise a host-supplied context; malformed values are ignored. */
+/**
+ * The audit's view of a call context. Nothing the host sends is kept in
+ * clear: a request id may be any text (a name, a phone number, an address),
+ * so the audit keeps its pseudonym, which still ties the lines of one call
+ * together for the host that knows the key; without a request id the audit
+ * makes one. The caller becomes a pseudonym the same way. Both are keyed
+ * with the host's policy.pseudonymKey when given.
+ */
 export function normaliseCallContext(context: unknown): { requestId: string; caller?: string } {
   const value = (context && typeof context === 'object' ? context : {}) as Record<string, unknown>;
+  const key = currentInstancePolicy()?.pseudonymKey;
+  const given = typeof value.requestId === 'string' && value.requestId.length > 0 ? value.requestId.slice(0, 1000) : undefined;
+  const requestId = given === undefined ? newRequestId() : pseudonym(given, key);
+  const caller = contextString(value.caller, 320);
   return {
-    requestId: contextString(value.requestId, 200) ?? newRequestId(),
-    caller: contextString(value.caller, 320),
+    requestId,
+    ...(caller === undefined ? {} : { caller: pseudonym(caller, key) }),
   };
 }
 

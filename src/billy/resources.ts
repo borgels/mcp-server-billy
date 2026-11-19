@@ -31,17 +31,105 @@ function asRecord(value: unknown): Json | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Json) : undefined;
 }
 
-function asArray(value: unknown): Json[] {
-  return Array.isArray(value) ? (value.map(asRecord).filter(Boolean) as Json[]) : [];
+/**
+ * The records of an embedded list (lines, contact persons, prices) when the
+ * answer has one: undefined when the field is absent or null, the records
+ * when it is a list. Anything else in its place (an object, a text), or an
+ * entry that is not a record, refuses the answer: a list is never left out
+ * without a word.
+ */
+function embedded(value: unknown): Json[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) throw new UnexpectedAnswerError();
+  const records = value.map(asRecord);
+  if (records.some(entry => entry === undefined)) throw new UnexpectedAnswerError();
+  return records as Json[];
 }
 
-/** The fields of `record` that are listed, in that order, leaving out absent ones. */
+/**
+ * The type of each field this server passes on, from the property tables of
+ * Billy's API v2 documentation (https://www.billy.dk/api): amounts, rates,
+ * counts and paging are numbers, `is*`, `has*` and `appliesTo*` are
+ * booleans, an account's `accountNo` is an integer, everything else (ids,
+ * dates, numbers the company chose, states, modes, names, texts) is a
+ * string. `invoiceNo` is a string in the property table and an integer in
+ * the examples, so both are taken. Any field may be null.
+ */
+const STRING_OR_NUMBER_FIELDS = new Set(['invoiceNo']);
+const NUMBER_FIELDS = new Set([
+  'cashAmount',
+  'cashExchangeRate',
+  'feeAmount',
+  'accountNo',
+  'amount',
+  'balance',
+  'tax',
+  'unitPrice',
+  'quantity',
+  'discountValue',
+  'exchangeRate',
+  'rate',
+  'priority',
+  'paymentTermsDays',
+  'fiscalYearEndMonth',
+  'page',
+  'pageCount',
+  'pageSize',
+  'total',
+]);
+const BOOLEAN_FIELDS = new Set([
+  'hasVat',
+  'isActive',
+  'isArchived',
+  'isBankAccount',
+  'isBankMatched',
+  'isBare',
+  'isCustomer',
+  'isLocked',
+  'isPaid',
+  'isPaymentEnabled',
+  'isPrimary',
+  'isSupplier',
+  'isTerminated',
+  'isTrial',
+  'isVoided',
+  'appliesToPurchases',
+  'appliesToSales',
+]);
+
+/** The number fields that are integers in the property tables (`integer`, not `float`), and the paging counts. */
+const INTEGER_FIELDS = new Set(['accountNo', 'priority', 'paymentTermsDays', 'fiscalYearEndMonth', 'page', 'pageCount', 'pageSize', 'total']);
+
+/** Whether `value` has the documented type of `field` (or is null). */
+function hasFieldType(field: string, value: unknown): boolean {
+  if (value === null) return true;
+  if (INTEGER_FIELDS.has(field)) return Number.isSafeInteger(value);
+  if (STRING_OR_NUMBER_FIELDS.has(field)) return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
+  if (NUMBER_FIELDS.has(field)) return typeof value === 'number' && Number.isFinite(value);
+  if (BOOLEAN_FIELDS.has(field)) return typeof value === 'boolean';
+  return typeof value === 'string';
+}
+
+/**
+ * The fields of `record` that are listed, in that order, leaving out absent
+ * ones. A field of another type than documented (an amount as text, a flag
+ * as text, a state as a number, an object anywhere) refuses the answer.
+ */
 function pick(record: Json, fields: readonly string[]): Json {
   const out: Json = {};
   for (const field of fields) {
-    if (Object.hasOwn(record, field) && record[field] !== undefined) out[field] = record[field];
+    if (!Object.hasOwn(record, field) || record[field] === undefined) continue;
+    const value = record[field];
+    if (!hasFieldType(field, value)) throw new UnexpectedAnswerError();
+    out[field] = value;
   }
   return out;
+}
+
+/** The `lines` of a record, shaped, when the answer has them (see embedded). */
+function lines(value: unknown, fields: readonly string[]): { lines?: Json[] } {
+  const records = embedded(value);
+  return records ? { lines: records.map(line => pick(line, fields)) } : {};
 }
 
 /** An answer from Billy that is not shaped as the documentation says: our own text, nothing of the answer. */
@@ -57,10 +145,13 @@ function hasId(record: Json | undefined): record is Json {
   return record !== undefined && typeof record.id === 'string' && record.id !== '';
 }
 
-/** The record under a singular root key (`{ invoice: {...} }`), with an id. Anything else is refused. */
-function single(body: unknown, key: string): Json {
+/**
+ * The record under a singular root key (`{ invoice: {...} }`), with an id;
+ * with `expectedId`, the id that was asked for. Anything else is refused.
+ */
+function single(body: unknown, key: string, expectedId?: string): Json {
   const record = asRecord(asRecord(body)?.[key]);
-  if (!hasId(record)) throw new UnexpectedAnswerError();
+  if (!hasId(record) || (expectedId !== undefined && record.id !== expectedId)) throw new UnexpectedAnswerError();
   return record;
 }
 
@@ -82,9 +173,9 @@ function list(body: unknown, key: string): Json[] {
  * answer: the first one with a string id. An answer without one is refused,
  * so a write is never reported as done without the record it made.
  */
-function firstChanged(body: unknown, key: string): Json {
+function firstChanged(body: unknown, key: string, expectedId?: string): Json {
   const [changed] = list(body, key);
-  if (!changed) throw new UnexpectedAnswerError();
+  if (!changed || (expectedId !== undefined && changed.id !== expectedId)) throw new UnexpectedAnswerError();
   return changed;
 }
 
@@ -151,12 +242,16 @@ async function scanAll(
   client: UpstreamClient,
   path: string,
   key: string,
+  fields: readonly string[],
   query: Record<string, QueryValue> = {},
 ): Promise<{ records: Json[]; complete: boolean }> {
   const records: Json[] = [];
   for (let page = 1; records.length < MAX_SCAN_RECORDS; page += 1) {
     const body = await get(client, path, { ...query, page, pageSize: MAX_PAGE_SIZE });
     const page_ = list(body, key);
+    // Every record is checked before it is filtered or counted: a field of another type than documented (a flag
+    // as text, say) refuses the answer rather than leaving the record out of the matches without a word.
+    for (const record of page_) pick(record, fields);
     records.push(...page_);
     const meta = paging(body);
     const pageCount = typeof meta?.pageCount === 'number' ? meta.pageCount : page;
@@ -209,7 +304,7 @@ export async function listContacts(
   client: UpstreamClient,
   input: { kind?: 'customer' | 'supplier' | 'all'; query?: string; includeArchived?: boolean; limit?: number },
 ): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/contacts', 'contacts');
+  const { records, complete } = await scanAll(client, '/contacts', 'contacts', CONTACT_FIELDS);
   const kind = input.kind ?? 'all';
   const matches = records.filter(
     contact =>
@@ -231,12 +326,9 @@ export async function listContacts(
  * customer portal address) is left out.
  */
 export async function getContact(client: UpstreamClient, input: { contactId: string }): Promise<Json> {
-  const contact = single(
-    await get(client, idPath('contacts', input.contactId, 'contactId'), { include: 'contact.contactPersons:embed' }),
-    'contact',
-  );
-  const persons = asArray(contact.contactPersons).map(person => pick(person, CONTACT_PERSON_FIELDS));
-  return { ...pick(contact, CONTACT_FIELDS), ...(Array.isArray(contact.contactPersons) ? { contactPersons: persons } : {}) };
+  const contact = single(await get(client, idPath('contacts', input.contactId, 'contactId'), { include: 'contact.contactPersons:embed' }), 'contact', input.contactId);
+  const persons = embedded(contact.contactPersons)?.map(person => pick(person, CONTACT_PERSON_FIELDS));
+  return { ...pick(contact, CONTACT_FIELDS), ...(persons ? { contactPersons: persons } : {}) };
 }
 
 export interface ContactInput {
@@ -287,7 +379,7 @@ export async function createContact(
 export async function updateContact(client: UpstreamClient, input: ContactInput & { contactId: string }): Promise<Json> {
   const contact = pick(input as unknown as Json, CONTACT_WRITABLE);
   const body = nestedFailuresAsStatus(await client.put(idPath('contacts', input.contactId, 'contactId'), { contact }));
-  return pick(firstChanged(body, 'contacts'), CONTACT_FIELDS);
+  return pick(firstChanged(body, 'contacts', input.contactId), CONTACT_FIELDS);
 }
 
 // ---------------------------------------------------------------------------
@@ -305,23 +397,26 @@ const PRODUCT_FIELDS = [
 ] as const;
 
 function shapeProduct(product: Json): Json {
-  const prices = asArray(product.prices).map(price => pick(price, ['currencyId', 'unitPrice']));
-  return { ...pick(product, PRODUCT_FIELDS), ...(Array.isArray(product.prices) ? { prices } : {}) };
+  const prices = embedded(product.prices)?.map(price => pick(price, ['currencyId', 'unitPrice']));
+  return { ...pick(product, PRODUCT_FIELDS), ...(prices ? { prices } : {}) };
 }
 
 export async function listProducts(
   client: UpstreamClient,
   input: { query?: string; includeArchived?: boolean; limit?: number },
 ): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/products', 'products', { include: 'product.prices:embed' });
-  const matches = records.filter(
-    product =>
+  const { records, complete } = await scanAll(client, '/products', 'products', PRODUCT_FIELDS, { include: 'product.prices:embed' });
+  // Every product is shaped, its embedded prices included, before it is searched, filtered or cut at the limit:
+  // an invalid price on a product that is not shown refuses the answer too.
+  const shaped = records.map(product => ({ product, row: shapeProduct(product) }));
+  const matches = shaped.filter(
+    ({ product }) =>
       (input.includeArchived || product.isArchived !== true) &&
       textMatches(product, ['name', 'productNo', 'description'], input.query),
   );
   const limit = input.limit ?? 100;
   return {
-    products: matches.slice(0, limit).map(shapeProduct),
+    products: matches.slice(0, limit).map(({ row }) => row),
     matched: matches.length,
     shown: Math.min(limit, matches.length),
     complete,
@@ -330,7 +425,7 @@ export async function listProducts(
 
 export async function getProduct(client: UpstreamClient, input: { productId: string }): Promise<Json> {
   return shapeProduct(
-    single(await get(client, idPath('products', input.productId, 'productId'), { include: 'product.prices:embed' }), 'product'),
+    single(await get(client, idPath('products', input.productId, 'productId'), { include: 'product.prices:embed' }), 'product', input.productId),
   );
 }
 
@@ -360,7 +455,7 @@ export async function updateProduct(client: UpstreamClient, input: ProductInput 
   const body = nestedFailuresAsStatus(
     await client.put(idPath('products', input.productId, 'productId'), { product: productBody(input) }),
   );
-  return shapeProduct(firstChanged(body, 'products'));
+  return shapeProduct(firstChanged(body, 'products', input.productId));
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +509,7 @@ const INVOICE_LINE_FIELDS = [
 function shapeInvoice(invoice: Json): Json {
   return {
     ...pick(invoice, INVOICE_FIELDS),
-    ...(Array.isArray(invoice.lines) ? { lines: asArray(invoice.lines).map(line => pick(line, INVOICE_LINE_FIELDS)) } : {}),
+    ...lines(invoice.lines, INVOICE_LINE_FIELDS),
   };
 }
 
@@ -457,7 +552,7 @@ export async function listInvoices(client: UpstreamClient, input: Json): Promise
 
 export async function getInvoice(client: UpstreamClient, input: { invoiceId: string }): Promise<Json> {
   return shapeInvoice(
-    single(await get(client, idPath('invoices', input.invoiceId, 'invoiceId'), { include: 'invoice.lines:embed' }), 'invoice'),
+    single(await get(client, idPath('invoices', input.invoiceId, 'invoiceId'), { include: 'invoice.lines:embed' }), 'invoice', input.invoiceId),
   );
 }
 
@@ -502,10 +597,10 @@ export async function listBills(client: UpstreamClient, input: Json): Promise<Js
 }
 
 export async function getBill(client: UpstreamClient, input: { billId: string }): Promise<Json> {
-  const bill = single(await get(client, idPath('bills', input.billId, 'billId'), { include: 'bill.lines:embed' }), 'bill');
+  const bill = single(await get(client, idPath('bills', input.billId, 'billId'), { include: 'bill.lines:embed' }), 'bill', input.billId);
   return {
     ...pick(bill, BILL_FIELDS),
-    ...(Array.isArray(bill.lines) ? { lines: asArray(bill.lines).map(line => pick(line, BILL_LINE_FIELDS)) } : {}),
+    ...lines(bill.lines, BILL_LINE_FIELDS),
   };
 }
 
@@ -546,12 +641,12 @@ export async function createDraftInvoice(client: UpstreamClient, input: InvoiceD
  */
 export async function approveInvoice(client: UpstreamClient, input: { invoiceId: string }): Promise<Json> {
   const path = idPath('invoices', input.invoiceId, 'invoiceId');
-  const current = single(await get(client, path), 'invoice');
+  const current = single(await get(client, path), 'invoice', input.invoiceId);
   if (current.state !== 'draft') {
     throw new Error('Refused: only a draft invoice can be approved, and this invoice is not a draft. Nothing was sent.');
   }
   const body = nestedFailuresAsStatus(await client.put(path, { invoice: { state: 'approved' } }));
-  return shapeInvoice(firstChanged(body, 'invoices'));
+  return shapeInvoice(firstChanged(body, 'invoices', input.invoiceId));
 }
 
 // ---------------------------------------------------------------------------
@@ -587,8 +682,8 @@ export async function registerPayment(client: UpstreamClient, input: PaymentInpu
   // against the same balance.
   return serialised(`${organizationId}:${kind}:${subjectId}`, async () => {
     const subject = isInvoice
-      ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice')
-      : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill');
+      ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice', subjectId)
+      : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill', subjectId);
     // The lock holds only if the document is the company's (organizationId, the documented belongs-to of each).
     if (subject.organizationId !== organizationId) {
       throw new Error(`Refused: the ${kind} does not show that it belongs to this company. Nothing was sent.`);
@@ -610,7 +705,7 @@ export async function registerPayment(client: UpstreamClient, input: PaymentInpu
     if (input.amount > subject.balance + 0.005) {
       throw new Error(`Refused: the amount is more than the ${kind}'s outstanding balance. Nothing was sent.`);
     }
-    const account = single(await get(client, idPath('accounts', input.cashAccountId, 'cashAccountId')), 'account');
+    const account = single(await get(client, idPath('accounts', input.cashAccountId, 'cashAccountId')), 'account', input.cashAccountId);
     if (account.isPaymentEnabled !== true) {
       throw new Error('Refused: the account is not set up for payments in Billy (isPaymentEnabled). Nothing was sent.');
     }
@@ -691,7 +786,7 @@ export async function listAccounts(
   input: { bankAccountsOnly?: boolean; paymentEnabledOnly?: boolean; includeArchived?: boolean; query?: string },
 ): Promise<Json> {
   // isBankAccount is the filter the documentation names under bank lines ("GET /v2/accounts?isBankAccount=true").
-  const { records, complete } = await scanAll(client, '/accounts', 'accounts', input.bankAccountsOnly ? { isBankAccount: true } : {});
+  const { records, complete } = await scanAll(client, '/accounts', 'accounts', ACCOUNT_FIELDS, input.bankAccountsOnly ? { isBankAccount: true } : {});
   const accounts = records.filter(
     account =>
       (input.includeArchived || account.isArchived !== true) &&
@@ -722,8 +817,9 @@ export async function listPostings(client: UpstreamClient, input: Json): Promise
 }
 
 export async function listDaybooks(client: UpstreamClient): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/daybooks', 'daybooks');
-  return { daybooks: records.map(daybook => pick(daybook, ['id', 'name', 'defaultContraAccountId'])), complete };
+  const fields = ['id', 'name', 'defaultContraAccountId'];
+  const { records, complete } = await scanAll(client, '/daybooks', 'daybooks', fields);
+  return { daybooks: records.map(daybook => pick(daybook, fields)), complete };
 }
 
 export const DAYBOOK_TRANSACTION_FILTERS = ['daybookId', 'state', 'minEntryDate', 'maxEntryDate', 'q'] as const;
@@ -741,7 +837,7 @@ const DAYBOOK_LINE_FIELDS = ['id', 'text', 'accountId', 'contraAccountId', 'taxR
 function shapeDaybookTransaction(transaction: Json): Json {
   return {
     ...pick(transaction, DAYBOOK_TRANSACTION_FIELDS),
-    ...(Array.isArray(transaction.lines) ? { lines: asArray(transaction.lines).map(line => pick(line, DAYBOOK_LINE_FIELDS)) } : {}),
+    ...lines(transaction.lines, DAYBOOK_LINE_FIELDS),
   };
 }
 
@@ -789,11 +885,10 @@ export async function createDaybookTransaction(client: UpstreamClient, input: Da
 }
 
 export async function listTaxRates(client: UpstreamClient, input: { includeInactive?: boolean }): Promise<Json> {
-  const { records, complete } = await scanAll(client, '/taxRates', 'taxRates');
+  const fields = ['id', 'name', 'abbreviation', 'rate', 'appliesToSales', 'appliesToPurchases', 'isActive'];
+  const { records, complete } = await scanAll(client, '/taxRates', 'taxRates', fields);
   return {
-    taxRates: records
-      .filter(rate => input.includeInactive || rate.isActive !== false)
-      .map(rate => pick(rate, ['id', 'name', 'abbreviation', 'rate', 'appliesToSales', 'appliesToPurchases', 'isActive'])),
+    taxRates: records.filter(rate => input.includeInactive || rate.isActive !== false).map(rate => pick(rate, fields)),
     complete,
   };
 }

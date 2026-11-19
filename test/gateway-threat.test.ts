@@ -27,14 +27,14 @@ function stub(key: string): typeof fetch {
     const path = (String(input).split('?')[0] ?? '').slice(BASE.length);
     switch (path) {
       case '/contacts/numbers':
-        return json({ contact: { id: 'x', name: { echo: Number(key), nested: { n: [Number(key.slice(1, 7)), Number(`${key}9`)] }, ok: true, count: 3 } } });
+        return json({ contact: { id: 'numbers', name: 'ok', paymentTermsDays: Number(key) } });
       case '/contacts/body-fails':
         // The vendor's text and a piece of the key shorter than six characters.
         return failingBody(`Vendor diagnostic ${key.slice(0, 5)}`);
       case '/contacts/nested':
         return json({
           contact: {
-            id: 'x',
+            id: 'nested',
             name: {
               metadata: { status: 401, error: `Vendor diagnostic ${key}` },
               failures: [{ status: 403, error: 'Vendor detail' }, { error: 'Vendor text' }],
@@ -42,7 +42,7 @@ function stub(key: string): typeof fetch {
           },
         });
       case '/contacts/deep':
-        return new Response(`{"contact":{"id":"x","name":${'['.repeat(DEEP)}1${']'.repeat(DEEP)}}}`, {
+        return new Response(`{"contact":{"id":"deep","extra":${'['.repeat(DEEP)}1${']'.repeat(DEEP)}}}`, {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -59,10 +59,7 @@ describe('the threat model, through callTool', () => {
     const gw = createBillyGateway({ accessToken: key, baseUrl: BASE, fetchImpl: stub(key), maxAttempts: 1, policy: { audit: r => void records.push(r) } });
     const result = await gw.callTool('get_contact', { contactId: 'numbers' });
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
-      id: 'x',
-      name: { echo: '‹redacted›', nested: { n: ['‹redacted›', '‹redacted›'] }, ok: true, count: 3 },
-    });
+    expect(result.structuredContent).toEqual({ id: 'numbers', name: 'ok', paymentTermsDays: '‹redacted›' });
     const serialised = JSON.stringify(result);
     expect(JSON.parse(serialised)).toEqual(result);
     expect(serialised).not.toMatch(/234567|12345678/);
@@ -81,16 +78,11 @@ describe('the threat model, through callTool', () => {
     }
   });
 
-  it('reduces failures reported inside a successful body to status-only text', async () => {
+  it('refuses a failure object where a value should be, with our own text and nothing of the vendor', async () => {
     const gw = createBillyGateway({ accessToken: KEY, baseUrl: BASE, fetchImpl: stub(KEY), maxAttempts: 1 });
     const result = await gw.callTool('get_contact', { contactId: 'nested' });
-    expect(result.structuredContent).toEqual({
-      id: 'x',
-      name: {
-        metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
-        failures: [{ status: 403, message: 'Billy API request failed with HTTP 403' }, { message: 'Billy API request failed.' }],
-      },
-    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain('without the expected data');
     expect(JSON.stringify(result)).not.toContain('Vendor');
   });
 
@@ -98,7 +90,8 @@ describe('the threat model, through callTool', () => {
     const gw = createBillyGateway({ accessToken: KEY, baseUrl: BASE, fetchImpl: stub(KEY), maxAttempts: 1, maxResponseBytes: 1_000_000 });
     const result = await gw.callTool('get_contact', { contactId: 'deep' });
     expect(result.isError).toBeUndefined();
-    expect(JSON.stringify(result)).toContain('[nested too deep]');
+    // The deep field is not one Billy's contact has, and is not passed on.
+    expect(result.structuredContent).toEqual({ id: 'deep' });
   });
 });
 
@@ -137,15 +130,12 @@ describe('round 5 of the threat model, through callTool', () => {
       baseUrl: BASE,
       maxAttempts: 1,
       fetchImpl: async (_input, init) =>
-        init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { id: 'x', name: body } }),
+        init?.method === 'POST' ? json({ contacts: [{ ...body, id: 'new', name: 'ok' }] }, 201) : json({ contact: { ...body, id: 'x', name: 'ok' } }),
       policy: { enableWrites: true },
     });
     for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
       expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
-      expect((result.structuredContent as { name: unknown }).name).toEqual({
-        metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
-        failures: [{ message: 'Billy API request failed.' }],
-      });
+      expect(JSON.stringify(result)).not.toMatch(/Vendor|VENDOR|metadata|failures/);
     }
   });
 
@@ -242,25 +232,16 @@ describe('round 6 of the threat model', () => {
         json({
           contact: {
             id: 'x',
-            name: {
-              failures: [{ status: 403, message: 'Vendor diagnostic' }],
-              metadata: { status: 401, error: null, message: 'Vendor diagnostic' },
-              errors: [{ message: 'Vendor diagnostic' }],
-              rows: [{ status: 200, message: 'kept' }],
-            },
+            name: 'ok',
+            failures: [{ status: 403, message: 'Vendor diagnostic' }],
+            metadata: { status: 401, error: null, message: 'Vendor diagnostic' },
+            errors: [{ message: 'Vendor diagnostic' }],
           },
         }),
     });
     const result = await gw.callTool('get_contact', { contactId: 'x' });
-    expect(result.structuredContent).toEqual({
-      id: 'x',
-      name: {
-        failures: [{ status: 403, message: 'Billy API request failed with HTTP 403' }],
-        metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
-        errors: [{ message: 'Billy API request failed.' }],
-        rows: [{ status: 200, message: 'kept' }],
-      },
-    });
+    expect(result.structuredContent).toEqual({ id: 'x', name: 'ok' });
+    expect(JSON.stringify(result)).not.toContain('Vendor');
   });
 
   it('names a network error code only from the fixed list', async () => {

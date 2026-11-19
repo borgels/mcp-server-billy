@@ -4,6 +4,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billyToolCatalog, createBillyGateway, resolveBillyChange, type GatewayJsonObject } from '../src/gateway.js';
 import { BASE } from './helpers.js';
+import { REDACTION_MARKER } from '../src/errors.js';
+import { fixedOutputs, RESULT_WITHHELD } from '../src/fallbacks.js';
+import { FIXED_CORPUS } from '../src/fixed-corpus.generated.js';
+import { logFieldValue } from '../src/tools/billy.js';
+
+// Pseudonym keys: 32 or more random printable characters that share no piece with any text of ours.
+const PSEUDONYM_KEY_1 = 'Qh7Vz2Lr9Xw4Nc8Tp3Yk6Bm1Fs5Jd0Ga'; // gitleaks:allow (a test value, not a key)
+const PSEUDONYM_KEY_2 = 'Wy3Rk8Pq1Zt6Hv9Lc2Xn5Bg7Md4Js0Fe'; // gitleaks:allow (a test value, not a key)
 
 const TOKEN = 'tttt-gggg-wwww-vvvv-1';
 const originalEnv = { ...process.env };
@@ -520,5 +528,347 @@ describe('after review', () => {
       expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl, policy: {} }), baseUrl).toThrow();
     }
     expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl: 'https://api.billy.dk/v2', policy: {} })).not.toThrow();
+  });
+});
+
+describe('after review 3', () => {
+  it('refuses a record with another id than asked for, an object where a value should be, and an invalid embedded entry', async () => {
+    const bad: Array<[string, GatewayJsonObject, Record<string, unknown>]> = [
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c2', name: 'X' } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', name: { nested: 'x' } } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', contactPersons: [{ id: 'p1' }, null] } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', contactPersons: 'nobody' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i2' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: [{ id: 'l1' }, 'bad'] } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', amount: { value: 1 } } } }],
+      ['update_contact', { contactId: 'c1', phone: '1' }, { 'PUT /contacts/c1': { contacts: [{ id: 'c9' }] } }],
+      ['list_invoices', {}, { 'GET /invoices': { invoices: [{ id: 'i1', state: ['approved'] }], meta: { paging: { page: 1 } } } }],
+    ];
+    for (const [tool, input, routes] of bad) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/nested|nobody/);
+    }
+  });
+
+  it('keeps no name or address of the caller or the request id in the audit', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'c1' } })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY_1 }, // gitleaks:allow (a test constant, not a key)
+    });
+    await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'Jens Jensen, Aarhus' });
+    await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'req-42' });
+    expect(JSON.stringify(records)).not.toMatch(/jens|Jensen|Aarhus/i);
+    expect(records[0]?.caller).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect(records[0]?.requestId).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect(records.at(-1)?.requestId).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect(JSON.stringify(records)).not.toContain('req-42');
+    expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: 'short' } })).toThrow(/pseudonymKey/);
+  });
+});
+
+describe('after review 4', () => {
+  const PSEUDONYM_KEY = PSEUDONYM_KEY_2; // gitleaks:allow (a test constant, not a key)
+  const page = { meta: { paging: { page: 1, pageCount: 1 } } };
+
+  it('refuses an embedded list that is not a list, instead of leaving it out', async () => {
+    const bad: Array<[string, GatewayJsonObject, Record<string, unknown>]> = [
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: { bad: true } } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: 'none' } } }],
+      ['get_bill', { billId: 'b1' }, { 'GET /bills/b1': { bill: { id: 'b1', lines: { bad: true } } } }],
+      ['get_bill', { billId: 'b1' }, { 'GET /bills/b1': { bill: { id: 'b1', lines: 7 } } }],
+      ['list_daybook_transactions', {}, { 'GET /daybookTransactions': { daybookTransactions: [{ id: 't1', lines: { bad: true } }], ...page } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', contactPersons: { bad: true } } } }],
+      ['get_product', { productId: 'p1' }, { 'GET /products/p1': { product: { id: 'p1', prices: { bad: true } } } }],
+    ];
+    for (const [tool, input, routes] of bad) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/bad|none/);
+    }
+    // Absent or null lists are still fine: the record comes without them.
+    for (const lines of [undefined, null]) {
+      const result = await call(billy({ 'GET /invoices/i1': { invoice: { id: 'i1', lines } } }).gw, 'get_invoice', { invoiceId: 'i1' });
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ id: 'i1' });
+    }
+  });
+
+  it('refuses a field of another type than documented', async () => {
+    const bad: Array<[string, GatewayJsonObject, Record<string, unknown>]> = [
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', amount: 'invalid' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', isPaid: 'false' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', state: 123 } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: [{ id: 'l1', quantity: '2' }] } } }],
+      ['get_bill', { billId: 'b1' }, { 'GET /bills/b1': { bill: { id: 'b1', balance: '300.00' } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', isCustomer: 1 } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', name: 42 } } }],
+      [
+        'list_daybook_transactions',
+        {},
+        { 'GET /daybookTransactions': { daybookTransactions: [{ id: 't1', lines: [{ id: 'l1', amount: 'NaN' }] }], ...page } },
+      ],
+    ];
+    for (const [tool, input, routes] of bad) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/invalid|NaN/);
+    }
+    const ok = await call(
+      billy({ 'GET /invoices/i1': { invoice: { id: 'i1', invoiceNo: '41', amount: 100, isPaid: false, state: 'approved', dueDate: null } } }).gw,
+      'get_invoice',
+      { invoiceId: 'i1' },
+    );
+    expect(ok.structuredContent).toEqual({ id: 'i1', invoiceNo: '41', amount: 100, isPaid: false, state: 'approved', dueDate: null });
+  });
+
+  it('never keeps a request id from the host in clear, whatever characters it uses', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'c1' } })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY },
+    });
+    // A name with a hyphen, a phone number, a private address and an internal host name: all within the old
+    // character filter. Made up for the test.
+    const given = ['Anne-Marie.Hansen', '+4512345678', '10.0.0.5', 'intra-01.corp.example:8443'];
+    for (const requestId of given) await gw.callTool('get_contact', { contactId: 'c1' }, { requestId });
+    await gw.callTool('get_contact', { contactId: 'c1' });
+    const text = JSON.stringify(records);
+    for (const value of given) expect(text).not.toContain(value);
+    expect(text).not.toMatch(/Anne|4512345678|10\.0\.0|corp/);
+    const ids = records.map(record => record.requestId);
+    for (const id of ids.slice(0, 8)) expect(id).toMatch(/^hmac:[0-9a-f]{16}$/);
+    // The lines of one call share their id; another call does not.
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[0]).not.toBe(ids[2]);
+    // Without a request id the audit makes its own.
+    expect(ids.at(-1)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('keeps the pseudonym key out of results, audit records and errors', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: (async (input: string | URL | Request) =>
+        String(input).includes('/contacts/c1')
+          ? Response.json({ contact: { id: 'c1', name: `Navn ${PSEUDONYM_KEY}` } })
+          : Response.json({ errorMessage: `Fejl ${PSEUDONYM_KEY}` }, { status: 400 })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY },
+    });
+    const results = [await gw.callTool('get_contact', { contactId: 'c1' }), await gw.callTool('get_contact', { contactId: 'c2' })];
+    expect(results[0]?.isError).toBeUndefined();
+    expect(results[1]?.isError).toBe(true);
+    const text = JSON.stringify([results, records]);
+    expect(text).not.toContain(PSEUDONYM_KEY);
+    expect(text).not.toContain(PSEUDONYM_KEY.slice(4, 16));
+  });
+
+  it('keeps a pseudonym key given as bytes out of results', async () => {
+    const bytes = new TextEncoder().encode(PSEUDONYM_KEY);
+    const hex = Buffer.from(bytes).toString('hex');
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'c1', name: PSEUDONYM_KEY, street: hex } })) as typeof fetch,
+      policy: { pseudonymKey: bytes },
+    });
+    const text = JSON.stringify(await gw.callTool('get_contact', { contactId: 'c1' }));
+    expect(text).not.toContain(PSEUDONYM_KEY);
+    expect(text).not.toContain(hex);
+  });
+
+  it('keeps a value with a hyphen as a kind in the log values', () => {
+    expect(logFieldValue('kind', 'on-hold')).toBe('on-hold');
+    expect(logFieldValue('kind', '-x')).toBeUndefined();
+  });
+});
+
+describe('after review 5: the pseudonym key anywhere', () => {
+  /** Every piece of six characters of a key (the redactor's fragment length). */
+  const pieces = (key: string) => Array.from({ length: Math.max(0, key.length - 5) }, (_, i) => key.slice(i, i + 6));
+  /** The pieces of any form of the key found in any of the values, raw or serialised. */
+  const leaked = (forms: string[], values: unknown[]) => {
+    const texts = values.map(value => (typeof value === 'string' ? value : JSON.stringify(value) ?? ''));
+    return forms.flatMap(pieces).filter(piece => texts.some(text => text.includes(piece)));
+  };
+  const formsOf = (key: string | Uint8Array) =>
+    typeof key === 'string' ? [key] : ['hex', 'base64', 'base64url', 'latin1'].map(form => Buffer.from(key).toString(form as BufferEncoding));
+  const construct = (options: Record<string, unknown>): Error | undefined => {
+    try {
+      createBillyGateway(options as never);
+      return undefined;
+    } catch (error) {
+      return error as Error;
+    }
+  };
+
+  // Every fixed text of ours long enough to be a key, the fallback texts joined, and texts of ours inside a key.
+  const OWN_TEXTS = [
+    ...FIXED_CORPUS.filter(text => text.length >= 32),
+    `${RESULT_WITHHELD}${REDACTION_MARKER}`,
+    `policy.enableWrites must be a boolean ${'z'.repeat(10)}`,
+    `BILLY_ACCESS_TOKEN-${'7'.repeat(14)}`,
+  ];
+  const BROKEN: Array<Record<string, unknown>> = [
+    {},
+    { baseUrl: 'not a url' },
+    { baseUrl: 'https://elsewhere.invalid/v2' },
+    { accessToken: 'short' },
+    { policy: { enableWrites: 'yes' } },
+    { policy: { disabledTools: ['no_such_tool'] } },
+  ];
+
+  it('refuses a pseudonym key that shares text with ours, and no construction error shows a piece of it', () => {
+    let checked = 0;
+    for (const text of OWN_TEXTS) {
+      for (const key of [text, new TextEncoder().encode(text)]) {
+        for (const broken of BROKEN) {
+          const { policy: brokenPolicy, ...rest } = broken as { policy?: Record<string, unknown> };
+          const error = construct({ accessToken: TOKEN, baseUrl: BASE, ...rest, policy: { ...brokenPolicy, pseudonymKey: key } });
+          expect(error, text).toBeInstanceOf(Error);
+          expect(leaked(formsOf(key), [error!.message, error!.stack, error!.name, error]), text).toEqual([]);
+          checked += 1;
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(50);
+  });
+
+  it('keeps an admitted pseudonym key out of construction errors, the tool list and every fixed output', () => {
+    for (const key of [PSEUDONYM_KEY_1, Buffer.from('a7f3c91e5b2d8046f1e9c3a7b5d20864d18b6e2f4a9c07e35b1d8f62c4a09e17', 'hex')]) {
+      for (const broken of BROKEN.slice(1)) {
+        const { policy: brokenPolicy, ...rest } = broken as { policy?: Record<string, unknown> };
+        const error = construct({ accessToken: TOKEN, baseUrl: BASE, ...rest, policy: { ...brokenPolicy, pseudonymKey: key } });
+        expect(error).toBeInstanceOf(Error);
+        expect(leaked(formsOf(key), [error!.message, error!.stack, error])).toEqual([]);
+      }
+      const gw = createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: key } });
+      expect(leaked(formsOf(key), [gw.tools, billyToolCatalog, fixedOutputs()])).toEqual([]);
+    }
+  });
+
+  it('refuses a pseudonym key that is too short, as text or bytes', () => {
+    for (const key of ['Qh7Vz2Lr9Xw4Nc8Tp3Yk6Bm', new Uint8Array(31)]) {
+      const error = construct({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: key } });
+      expect(error?.message).toMatch(/pseudonymKey/);
+    }
+  });
+
+  it('keeps an admitted pseudonym key out of results, errors and audit records wherever Billy or the host puts it', async () => {
+    const key = PSEUDONYM_KEY_1; // gitleaks:allow (a test constant, not a key)
+    const records: unknown[] = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: (async (input: string | URL | Request) => {
+        const path = new URL(String(input)).pathname;
+        if (path.endsWith('/contacts/c1')) return Response.json({ contact: { id: 'c1', name: key, street: key.slice(3, 20), cityText: `x${key}x` } });
+        if (path.endsWith('/contacts/c2')) return Response.json({ errorMessage: key, errorCode: key }, { status: 400 });
+        if (path.endsWith('/contacts/c3')) return new Response(null, { status: 302, headers: { location: `https://elsewhere.test/${key}` } });
+        throw new TypeError(`fetch failed ${key}`);
+      }) as typeof fetch,
+      policy: { audit: record => void records.push(record), pseudonymKey: key },
+    });
+    const results = [];
+    for (const contactId of ['c1', 'c2', 'c3', 'c4']) {
+      results.push(await gw.callTool('get_contact', { contactId }, { caller: key, requestId: key }));
+    }
+    results.push(await gw.callTool(`get_${key}`, { [key]: key }, { caller: key }));
+    results.push(await gw.callTool('get_contact', { contactId: 'c1', [key]: 1 }));
+    results.push(await gw.callTool('get_contact', { contactId: key }));
+    expect(results[0]?.isError).toBeUndefined();
+    expect(leaked([key], [results, records])).toEqual([]);
+  });
+});
+
+describe('after review 5: answers are checked before they are filtered', () => {
+  const page = { meta: { paging: { page: 1, pageCount: 1 } } };
+
+  it('refuses an integer field with a fraction', async () => {
+    for (const [tool, input, routes] of [
+      ['list_accounts', {}, { 'GET /accounts': { accounts: [{ id: 'a1', accountNo: 12.5 }], ...page } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', paymentTermsDays: 7.5 } } }],
+    ] as Array<[string, GatewayJsonObject, Record<string, unknown>]>) {
+      expect((await call(billy(routes).gw, tool, input)).isError, tool).toBe(true);
+    }
+  });
+
+  it('refuses a list in which a record that would be filtered out has a field of the wrong type', async () => {
+    for (const [tool, input, routes] of [
+      ['list_contacts', { kind: 'customer' }, { 'GET /contacts': { contacts: [{ id: 'c1', isCustomer: 'true' }], ...page } }],
+      ['list_contacts', {}, { 'GET /contacts': { contacts: [{ id: 'c1', isArchived: 'false' }], ...page } }],
+      ['list_products', {}, { 'GET /products': { products: [{ id: 'p1', isArchived: 1 }], ...page } }],
+      ['list_accounts', { bankAccountsOnly: true }, { 'GET /accounts': { accounts: [{ id: 'a1', isBankAccount: 'yes' }], ...page } }],
+      ['list_tax_rates', {}, { 'GET /taxRates': { taxRates: [{ id: 't1', isActive: 'false' }], ...page } }],
+      ['list_daybooks', {}, { 'GET /daybooks': { daybooks: [{ id: 'd1', name: 7 }], ...page } }],
+    ] as Array<[string, GatewayJsonObject, Record<string, unknown>]>) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+    }
+  });
+
+  it('keeps a record id in the audit only as a pseudonym, so a name given as an id is not there', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'Anne-Marie-Hansen' } })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY_2 }, // gitleaks:allow (a test constant, not a key)
+    });
+    await gw.callTool('get_contact', { contactId: 'Anne-Marie-Hansen' });
+    expect(JSON.stringify(records)).not.toMatch(/Anne|Marie|Hansen/);
+    expect((records[0]?.target as Record<string, unknown>).contactId).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect((records[0]?.target as Record<string, unknown>).contactId).toBe((records.at(-1)?.target as Record<string, unknown>).contactId);
+  });
+});
+
+describe('after review 6', () => {
+  const page = { meta: { paging: { page: 1, pageCount: 1 } } };
+  const products = [
+    { id: 'p1', name: 'Kop', prices: [{ currencyId: 'DKK', unitPrice: 49 }] },
+    { id: 'p2', name: 'Krus', prices: [null] },
+    { id: 'p3', name: 'Tallerken', isArchived: true, prices: { bad: true } },
+  ];
+
+  it('refuses a product list in which a product that is not shown has an invalid price', async () => {
+    for (const [label, list, input] of [
+      ['search', products.slice(0, 2), { query: 'Kop' }],
+      ['limit 1', products.slice(0, 2), { limit: 1 }],
+      ['archived', [products[0], products[2]], {}],
+    ] as Array<[string, unknown[], GatewayJsonObject]>) {
+      const result = await call(billy({ 'GET /products': { products: list, ...page } }).gw, 'list_products', input);
+      expect(result.isError, label).toBe(true);
+    }
+    const ok = await call(billy({ 'GET /products': { products: products.slice(0, 1), ...page } }).gw, 'list_products', { limit: 1 });
+    expect(ok.structuredContent).toMatchObject({ products: [{ id: 'p1', prices: [{ currencyId: 'DKK', unitPrice: 49 }] }], complete: true });
+  });
+});
+
+describe('after review 7', () => {
+  it('refuses a pseudonym key that is not valid UTF-16, with the sealed refusal and no piece of it', () => {
+    const pieces = (key: string) => Array.from({ length: key.length - 5 }, (_, i) => key.slice(i, i + 6));
+    for (const key of [`Qh7Vz2Lr9Xw4Nc8T\uD800p3Yk6Bm1Fs5Jd0Ga`, `\uDC00Wy3Rk8Pq1Zt6Hv9Lc2Xn5Bg7Md4Js0Fe`, `Zr8qLw2Xv7NcT4pK9mYb3HsD6fJgQ1aE\uDBFF`]) {
+      for (const broken of [{}, { baseUrl: 'not a url' }, { accessToken: 'short' }]) {
+        let caught: Error | undefined;
+        try {
+          createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, ...broken, policy: { pseudonymKey: key } } as never);
+        } catch (error) {
+          caught = error as Error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught!.name).toBe('ConfigError');
+        expect(String(caught!.stack)).toBe(`${caught!.name}: ${caught!.message}`);
+        const text = [caught!.message, caught!.stack, JSON.stringify(caught)].join(' ');
+        for (const piece of pieces(key)) expect(text, piece).not.toContain(piece);
+      }
+    }
   });
 });

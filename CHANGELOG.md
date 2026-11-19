@@ -37,5 +37,22 @@ documentation (https://www.billy.dk/api, API v2).
   must have type `bill` and credit no other bill; records must have an id and
   a list with an invalid entry is refused whole; `create_contact` requires
   `paymentTermsDays`.
+- After the third review: a record must have the id asked for; an object
+  where a value should be, or an embedded entry that is not a record,
+  refuses the answer; the audit keeps the caller only as a pseudonym
+  (`policy.pseudonymKey`).
+- After the fourth review: the request id is kept only as a pseudonym too,
+  and the pseudonym key is redacted like the access token. An embedded list
+  (lines, contact persons, prices) that is there but is not a list refuses
+  the answer instead of being left out, and every field passed on must have
+  the type of Billy's property tables (amounts and counts numbers, flags
+  booleans, the rest strings; null allowed).
+- After the fifth review: the pseudonym key is at least 32 characters or
+  bytes, admitted like the access token, and known to the error guard before
+  anything is validated; integer fields must be whole numbers; records read
+  to the end (products with their prices) are checked before they are
+  filtered or cut at the limit; registering the pseudonym key cannot throw
+  (text that is not valid UTF-16 included); record ids are logged in
+  the audit only as pseudonyms.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.

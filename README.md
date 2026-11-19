@@ -41,7 +41,7 @@ Writes (off unless `BILLY_ENABLE_WRITES=true`, or `enableWrites` in a host's pol
 | `billy_register_payment` | Register that an approved invoice or bill was paid, on a payment account. Moves no money. Refuses an amount above the positive outstanding balance, a paid or unapproved invoice or bill, a document that does not carry the company's id (`organizationId`), anything but an ordinary invoice (`type: invoice`) or bill (`type: bill`, not crediting another bill) so a credit note or a missing or unknown type is refused, an unknown currency, an account that is not a payment account, or another currency. Billy's documentation lists the bill `type` as an enum without its values; `bill` is assumed by analogy with invoices and has not been checked against a live company, so a bill payment may be refused until it is. Registrations of one document run one at a time in this process, keyed on the company's Billy id (from `GET /organization`) and the document id, so two tokens or API hosts of the same company share the lock; a payment registered in Billy by someone else at the same moment is not seen, and Billy may then put an overpayment on the contact's balance. Marked `requiresConfirmation` for hosts. |
 | `billy_create_daybook_transaction` | Put a transaction with lines in a daybook as a draft. A person approves it in Billy. |
 
-An answer without the root key the documentation describes (`{ invoice: ... }`, `{ invoices: [...] }`), a record without an id, a list with any entry that is not a record with an id, or a write answer without the changed record, is an error, not an empty result.
+An answer without the root key the documentation describes (`{ invoice: ... }`, `{ invoices: [...] }`), a record without an id or with another id than the one asked for, an object or a list where Billy's documentation has a single value, a list (also an embedded one: lines, contact persons, prices) with any entry that is not a record, or a write answer without the changed record, is an error, not an empty or partial result.
 
 Lists without documented filters in Billy (contacts, products, accounts, daybooks, VAT rates) are read to the end, at most 5,000 records, and filtered by the server; `complete` is false when there were more. Billy ignores unknown query parameters rather than refusing them, so the server sends only the filters Billy documents.
 
@@ -128,7 +128,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 |---|---|---|
 | `BILLY_ENABLE_WRITES` | `false` | Enable the write tools. |
 | `BILLY_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `billy_` prefix. |
-| `BILLY_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text (names, numbers, descriptions, searches) hashed, lists counted, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
+| `BILLY_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with record ids as pseudonyms, states, dates and amounts in clear text, free text (names, numbers, descriptions, searches) hashed, lists counted, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
 
 ### HTTP transport
 
@@ -219,6 +219,8 @@ refuses a key that shares a piece of 6 characters with a string literal in
 refusal is a fixed text that never repeats the key. The standalone MCP server redacts its results, errors and audit records
 with its token and withholds a result that still holds a piece of it, as
 the gateway does.
+
+**Call context in the audit.** The `caller` a host passes is never logged in clear: it becomes a pseudonym (HMAC-SHA-256 with `policy.pseudonymKey`, else SHA-256). The key is at least 32 random printable characters or 32 random bytes and is admitted like the access token: a key that shares a piece of six characters with any text of this server is refused, so no error, fallback or tool description can carry part of it. Record ids are logged as pseudonyms the same way, since the input cannot tell an id from a name. Nor is a `requestId`: any text can hold a name, a phone number or an address, so the audit keeps its pseudonym the same way, which still ties the lines of one call together for a host that knows the key; without one the audit makes its own id. The pseudonym key is a secret of the instance like the access token: it is redacted from results, audit records and errors.
 
 **Rejected calls.** A call refused before it runs (an unknown tool or
 invalid input) is audited with a fixed code (`unknown_tool`,

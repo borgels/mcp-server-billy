@@ -110,7 +110,9 @@ describe('the sink check', () => {
 const asContact =
   (body: unknown): typeof fetch =>
   async (_input, init) =>
-    init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { id: 'x', name: body } });
+    init?.method === 'POST'
+      ? json({ contacts: [{ ...(body as object), id: 'new', name: 'ok' }] }, 201)
+      : json({ contact: { ...(body as object), id: 'x', name: 'ok' } });
 
 describe('failure texts', () => {
   it('replaces texts in failure lists of a successful answer, for reads and writes', async () => {
@@ -122,10 +124,9 @@ describe('failure texts', () => {
       fetchImpl: asContact({ data: { failures: ['Vendor diagnostic'], errors: ['Vendor diagnostic'] } }),
     });
     for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
+      expect(result.isError).toBeUndefined();
       expect(JSON.stringify(result)).not.toContain('Vendor');
-      expect(result.structuredContent).toMatchObject({
-        name: { data: { failures: [{ message: 'Billy API request failed.' }], errors: [{ message: 'Billy API request failed.' }] } },
-      });
+      expect(JSON.stringify(result)).not.toContain('failures');
     }
   });
 });
@@ -166,8 +167,8 @@ describe('round 8', () => {
         fetchImpl: asContact(body),
       });
       for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 })]) {
+        expect(result.isError).toBeUndefined();
         expect(JSON.stringify(result)).not.toContain('Vendor');
-        expect(JSON.stringify(result.structuredContent)).toContain('"message":"Billy API request failed."');
       }
     }
   });
