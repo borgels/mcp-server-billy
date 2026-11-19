@@ -294,14 +294,15 @@ export function createBillyGateway(options: BillyGatewayOptions) {
   let accessToken: string | undefined;
   // The host's pseudonym key, in every form it could be written, read before anything else can fail.
   const pseudonymForms = keyForms((options as Partial<BillyGatewayOptions> | undefined)?.policy?.pseudonymKey);
-  // Every secret is known to the guard before any validation that can throw.
   const guard = new SecretRedactor();
-  for (const form of pseudonymForms) guard.addSecret(form);
   // What the host gave, admitted or not: every error is masked against it, the pseudonym key included.
   const given: unknown = (options as Partial<BillyGatewayOptions> | undefined)?.accessToken;
   const secrets = [...(typeof given === 'string' ? [given, given.trim()] : []), ...pseudonymForms];
   const refusal = () => keyRefusedText(accessToken ?? '');
   try {
+    // Every secret is known to the guard before any validation that can throw, and inside the try: whatever
+    // happens while registering it leaves as the sealed error below.
+    for (const form of pseudonymForms) guard.addSecret(form);
     // The pseudonym key is admitted like the access token: as text, printable and sharing no piece with any text
     // of ours, so no fixed text (a fallback, an error, the tool list) can carry a piece of it; as bytes, every
     // form of it that is printable text (the bytes read as text, hex, base64) the same way.

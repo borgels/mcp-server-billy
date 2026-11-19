@@ -51,7 +51,8 @@ documentation (https://www.billy.dk/api, API v2).
   bytes, admitted like the access token, and known to the error guard before
   anything is validated; integer fields must be whole numbers; records read
   to the end (products with their prices) are checked before they are
-  filtered or cut at the limit; record ids are logged in
+  filtered or cut at the limit; registering the pseudonym key cannot throw
+  (text that is not valid UTF-16 included); record ids are logged in
   the audit only as pseudonyms.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.

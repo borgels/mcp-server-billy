@@ -851,3 +851,24 @@ describe('after review 6', () => {
     expect(ok.structuredContent).toMatchObject({ products: [{ id: 'p1', prices: [{ currencyId: 'DKK', unitPrice: 49 }] }], complete: true });
   });
 });
+
+describe('after review 7', () => {
+  it('refuses a pseudonym key that is not valid UTF-16, with the sealed refusal and no piece of it', () => {
+    const pieces = (key: string) => Array.from({ length: key.length - 5 }, (_, i) => key.slice(i, i + 6));
+    for (const key of [`Qh7Vz2Lr9Xw4Nc8T\uD800p3Yk6Bm1Fs5Jd0Ga`, `\uDC00Wy3Rk8Pq1Zt6Hv9Lc2Xn5Bg7Md4Js0Fe`, `Zr8qLw2Xv7NcT4pK9mYb3HsD6fJgQ1aE\uDBFF`]) {
+      for (const broken of [{}, { baseUrl: 'not a url' }, { accessToken: 'short' }]) {
+        let caught: Error | undefined;
+        try {
+          createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, ...broken, policy: { pseudonymKey: key } } as never);
+        } catch (error) {
+          caught = error as Error;
+        }
+        expect(caught).toBeInstanceOf(Error);
+        expect(caught!.name).toBe('ConfigError');
+        expect(String(caught!.stack)).toBe(`${caught!.name}: ${caught!.message}`);
+        const text = [caught!.message, caught!.stack, JSON.stringify(caught)].join(' ');
+        for (const piece of pieces(key)) expect(text, piece).not.toContain(piece);
+      }
+    }
+  });
+});
