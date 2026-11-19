@@ -145,7 +145,7 @@ describe('the data in the text block', () => {
   });
 
   it('gives a client that reads only the text the data', async () => {
-    const { gw } = gateway({ [`GET ${BASE}/contacts/7`]: { body: { id: '7', name: 'Testvare Blå' } } });
+    const { gw } = gateway({ [`GET ${BASE}/contacts/7`]: { body: { contact: { id: '7', name: 'Testvare Blå' } } } });
     const result = await gw.callTool('get_contact', { contactId: '7' });
     expect(result.isError, result.content[0]?.text).toBeUndefined();
     expect(result.content[0]!.text).toContain('"name":"Testvare Blå"');

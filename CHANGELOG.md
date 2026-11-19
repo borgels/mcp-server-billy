@@ -23,5 +23,13 @@ documentation (https://www.billy.dk/api, API v2).
 - Gateway catalog with `requiresConfirmation` (register_payment) and
   `change` per write tool, and `resolveBillyChange` for a host that logs a
   change before it is sent.
+- After review: the standalone MCP server redacts results like the
+  gateway; payment registrations are serialised per company and document,
+  refuse credit notes, non-positive balances and unknown currencies; rejected
+  calls are audited with fixed codes and known field names only; the change
+  resolution runs the tool's own checks (`gateway.resolveChange` also drops
+  values holding the token); exact host match; answers without the
+  documented root key or changed record are errors; a draft invoice takes
+  currency and payment terms explicitly.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.

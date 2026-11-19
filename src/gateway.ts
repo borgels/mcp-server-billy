@@ -18,6 +18,7 @@ import {
   executeTool,
   findTool,
   logFieldValue,
+  validateCall,
   validateStartupConfig,
   type BillyChangeAction,
   type BillyChangeRecord,
@@ -238,19 +239,23 @@ export type BillyChangeResolution =
 export function resolveBillyChange(
   toolName: string,
   input: GatewayJsonObject = {},
-  options: { pseudonymKey?: string | Uint8Array } = {},
+  options: { pseudonymKey?: string | Uint8Array; redactor?: SecretRedactor } = {},
 ): BillyChangeResolution {
   const name = typeof toolName === 'string' ? toolName.trim() : '';
   const tool = name ? findTool(`${TOOL_PREFIX}${stripPrefix(name)}`) : undefined;
   if (!tool) return { ok: false, reason: 'Unsupported Billy gateway tool.' };
   if (!tool.change) return { ok: false, reason: `${stripPrefix(tool.name)} is not a write tool.` };
-  const parsed = tool.inputSchema.safeParse(input ?? {});
-  if (!parsed.success) return { ok: false, reason: `Invalid input for ${stripPrefix(tool.name)}.` };
-  const data = parsed.data as Record<string, unknown>;
+  const valid = validateCall(tool, input);
+  if (!valid.ok) return { ok: false, reason: `Invalid input for ${stripPrefix(tool.name)}.` };
+  const data = valid.data;
   const values: Record<string, string | number | boolean> = {};
   for (const field of tool.change.logFields) {
     const value = logFieldValue(field.type, data[field.name], options.pseudonymKey);
-    if (value !== undefined) values[field.name] = value;
+    if (value === undefined) continue;
+    // A secret put in a field by mistake never reaches the host's log: with an instance's redactor, a value that
+    // holds a piece of its token is left out.
+    if (options.redactor && leaksSecret(String(value), options.redactor)) continue;
+    values[field.name] = value;
   }
   return {
     ok: true,
@@ -348,6 +353,13 @@ function buildGateway(options: BillyGatewayOptions, accessToken: string) {
   const underPolicy = <T>(work: () => T): T => runInCallScope(policy ? { policy, redactor } : { redactor }, work);
 
   return {
+    /**
+     * resolveBillyChange bound to this instance: a value that holds a piece of
+     * this instance's token is left out of the values.
+     */
+    resolveChange(toolName: string, input: GatewayJsonObject = {}, resolveOptions: { pseudonymKey?: string | Uint8Array } = {}) {
+      return resolveBillyChange(toolName, input, { ...resolveOptions, redactor });
+    },
     /** Tools enabled on this instance (the policy's or BILLY_DISABLED_TOOLS' disabled tools are left out). */
     tools: underPolicy(() => billyGatewayTools.filter(tool => !isToolDisabled(tool.name))),
     callTool(toolName: string, input: GatewayJsonObject = {}, context?: GatewayCallContext): Promise<GatewayToolResult> {
@@ -380,15 +392,14 @@ function buildGateway(options: BillyGatewayOptions, accessToken: string) {
       const tool = name ? findTool(`${TOOL_PREFIX}${stripPrefix(name)}`) : undefined;
       if (!tool) {
         // Redacted before it is cut short: a cut key would no longer match the redactor.
-        const reason = `Unsupported Billy gateway tool: ${redactor.redact(String(toolName)).slice(0, 100)}`;
-        await auditRejectedCall(String(toolName), input, reason, context);
-        return errorResult(redactor.redact(reason));
+        await auditRejectedCall(String(toolName), input, 'unknown_tool', context);
+        return errorResult('Unsupported Billy gateway tool.');
       }
 
       const parsed = tool.inputSchema.safeParse(input ?? {});
       if (!parsed.success) {
         const reason = `Invalid input for ${name}: ${z.prettifyError(parsed.error)}`;
-        await auditRejectedCall(tool.name, input, 'invalid input', context);
+        await auditRejectedCall(tool.name, input, 'invalid_input', context);
         return errorResult(redactor.redact(reason));
       }
 

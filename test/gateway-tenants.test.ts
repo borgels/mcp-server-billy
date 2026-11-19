@@ -69,7 +69,7 @@ describe('explicit gateway credentials', () => {
 
     expect(() => createBillyGateway({ baseUrl: BASE } as never)).toThrow(/requires options\.accessToken/);
 
-    const fetchImpl = stubFetch({ [`GET ${BASE}/contacts/i1`]: { body: { id: 'i1' } } });
+    const fetchImpl = stubFetch({ [`GET ${BASE}/contacts/i1`]: { body: { contact: { id: 'i1' } } } });
     const gw = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: fetchImpl as unknown as typeof fetch });
     const result = await gw.callTool('get_contact', { contactId: 'i1' });
     expect(result.isError).toBeUndefined();
@@ -190,7 +190,7 @@ const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
   update_contact: { contactId: 'c1', phone: '12345678' },
   create_product: { name: 'New product', prices: [{ currencyId: 'DKK', unitPrice: 100 }] },
   update_product: { productId: 'p1', name: 'Renamed' },
-  create_draft_invoice: { contactId: 'c1', entryDate: '2026-11-19', lines: [{ productId: 'p1', unitPrice: 100 }] },
+  create_draft_invoice: { contactId: 'c1', entryDate: '2026-11-19', currencyId: 'DKK', paymentTermsDays: 8, lines: [{ productId: 'p1', unitPrice: 100 }] },
   approve_invoice: { invoiceId: 'i1' },
   register_payment: { billId: 'b1', cashAccountId: 'a1', amount: 100, entryDate: '2026-11-19' },
   create_daybook_transaction: { entryDate: '2026-11-19', lines: [{ accountId: 'a1', amount: 10, side: 'debit' }] },
@@ -199,10 +199,16 @@ const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
 /** Answers that let every tool run to its end: a draft invoice, an approved unpaid bill and a payment account. */
 async function catalogFetch(input: string | URL | Request): Promise<Response> {
   const path = new URL(String(input)).pathname;
-  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft' } });
+  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft' }, invoices: [{ id: 'i1' }] });
   if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
   if (path.includes('/accounts/')) return Response.json({ account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } });
-  return Response.json({ ok: true });
+  // Every list and record root key the tools read, and one changed record for every write.
+  const roots = ['organization', 'contact', 'product'];
+  const lists = ['contacts', 'products', 'invoices', 'bills', 'accounts', 'postings', 'daybooks', 'daybookTransactions', 'taxRates', 'bankPayments'];
+  return Response.json({
+    ...Object.fromEntries(roots.map(key => [key, { id: 'x1' }])),
+    ...Object.fromEntries(lists.map(key => [key, [{ id: 'x1' }]])),
+  });
 }
 
 describe('tool catalog', () => {

@@ -134,16 +134,14 @@ describe('round 5 of the threat model, through callTool', () => {
       baseUrl: BASE,
       maxAttempts: 1,
       fetchImpl: async (_input, init) =>
-        init?.method === 'POST' ? json({ contacts: [{ name: body }] }, 201) : json({ contact: { name: body } }),
+        init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { name: body } }),
       policy: { enableWrites: true },
     });
     for (const result of [await gw.callTool('get_contact', { contactId: 'x' }), await gw.callTool('create_contact', { name: 'n', countryId: 'DK' })]) {
       expect(result.isError, JSON.stringify(result.content)).toBeUndefined();
-      expect(result.structuredContent).toEqual({
-        name: {
-          metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
-          failures: [{ message: 'Billy API request failed.' }],
-        },
+      expect((result.structuredContent as { name: unknown }).name).toEqual({
+        metadata: { status: 401, error: 'Billy API request failed with HTTP 401' },
+        failures: [{ message: 'Billy API request failed.' }],
       });
     }
   });
@@ -182,7 +180,7 @@ describe('round 5 of the threat model, through callTool', () => {
         accessToken: KEY,
         baseUrl: BASE,
         maxAttempts: 1,
-        fetchImpl: async () => json({ name: 'ok' }),
+        fetchImpl: async () => json({ contact: { name: 'ok' } }),
         policy: {
           audit: () => {
             throw new Error(`sink failed for ${KEY}`);

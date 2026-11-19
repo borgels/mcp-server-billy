@@ -36,10 +36,12 @@ Writes (off unless `BILLY_ENABLE_WRITES=true`, or `enableWrites` in a host's pol
 |---|---|
 | `billy_create_contact` / `billy_update_contact` | Create a customer or supplier (with contact persons), or change the fields given. Contacts in Billy have no bank details. |
 | `billy_create_product` / `billy_update_product` | Create a product, or change the fields given; prices, when given, replace the product's prices. |
-| `billy_create_draft_invoice` | Create an invoice as a draft. It is not approved, e-mailed or sent. |
-| `billy_approve_invoice` | Approve (book) a draft invoice. Refuses anything but a draft. Billy then numbers it; it cannot return to draft, only be credited. Not e-mailed or sent. |
-| `billy_register_payment` | Register that an approved invoice or bill was paid, on a payment account. Moves no money. Refuses an amount above what is owed, a paid or unapproved invoice or bill, an account that is not a payment account, or another currency. Marked `requiresConfirmation` for hosts. |
+| `billy_create_draft_invoice` | Create an invoice as a draft, with currency and payment terms given explicitly. Billy gives it a number from the company's number model when it is created. It is not approved, e-mailed or sent. |
+| `billy_approve_invoice` | Approve (book) a draft invoice. Refuses anything but a draft. It cannot return to draft, only be credited. Not e-mailed or sent. |
+| `billy_register_payment` | Register that an approved invoice or bill was paid, on a payment account. Moves no money. Refuses an amount above the positive outstanding balance, a paid or unapproved invoice or bill, a credit note, an unknown currency, an account that is not a payment account, or another currency. Registrations of one document run one at a time in this process; a payment registered in Billy by someone else at the same moment is not seen, and Billy may then put an overpayment on the contact's balance. Marked `requiresConfirmation` for hosts. |
 | `billy_create_daybook_transaction` | Put a transaction with lines in a daybook as a draft. A person approves it in Billy. |
+
+An answer without the root key the documentation describes (`{ invoice: ... }`, `{ invoices: [...] }`), or a write answer without the changed record, is an error, not an empty result.
 
 Lists without documented filters in Billy (contacts, products, accounts, daybooks, VAT rates) are read to the end, at most 5,000 records, and filtered by the server; `complete` is false when there were more. Billy ignores unknown query parameters rather than refusing them, so the server sends only the filters Billy documents.
 
@@ -114,7 +116,7 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 | Variable | Default | Description |
 |---|---|---|
 | `BILLY_ACCESS_TOKEN` | – | **Required.** Access token of one Billy company, sent as `X-Access-Token`. |
-| `BILLY_BASE_URL` | `https://api.billysbilling.com/v2` | Base URL of the API. Only `api.billysbilling.com` and `api.billy.dk` (the hosts in Billy's documentation) are accepted, over `https` (loopback `http` is allowed for local mocks). |
+| `BILLY_BASE_URL` | `https://api.billysbilling.com/v2` | Base URL of the API. Only exactly `api.billysbilling.com` and `api.billy.dk` (the hosts in Billy's documentation, no subdomains) are accepted, over `https` (loopback `http` is allowed for local mocks). |
 | `BILLY_ALLOW_CUSTOM_BASE_URL` | `false` | Allow another host. |
 | `BILLY_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
 | `BILLY_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
@@ -161,7 +163,7 @@ const result = await gateway.callTool('list_invoices', { isPaid: false }, { call
 - **Instance policy from the host.** Pass `policy` to `createBillyGateway`: `enableWrites` (default false), `disabledTools` (must name known tools) and `audit`, a function that receives each audit record instead of `BILLY_AUDIT_LOG` (without it the instance writes no audit; a write tool does not run if the sink throws on its start record). An instance with `policy` reads none of `BILLY_ENABLE_WRITES`, `BILLY_DISABLED_TOOLS`, `BILLY_AUDIT_LOG` or `BILLY_ALLOW_CUSTOM_BASE_URL`. Each call runs in a scope of its own. The limits (`BILLY_TIMEOUT_MS`, ...) are still read from the environment and apply to every gateway in the process. Per-user authorization is the host's job.
 - **Result format.** A successful `callTool` result has `structuredContent` and one text block: a short summary, a blank line, and the same data as compact JSON. An error result has only its text.
 - **Tool catalog.** `billyToolCatalog` is a frozen list of every tool: `name` (without the `billy_` prefix), `title`, `description`, `riskLevel` (`read` or `write`; no tool is `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema), `broad` (false for every tool), `upstream` (the API requests the tool may make), `requiresConfirmation` (true for `register_payment` only: a host should have a person confirm it outside the chat) and, for write tools, `change`: the action (`create`, `update`, `approve`, `register_payment`), the record kind and `logFields`.
-- **Change resolution.** `resolveBillyChange(tool, input, { pseudonymKey })` returns what a write call will change before it is sent, for a host that logs the change first: Billy record ids, amounts, currency codes, dates, flags and the number of lines in clear; a number the company chose (contact, product or voucher number) only as a pseudonym (HMAC-SHA-256 with the host's key, else SHA-256); never a name, an address or a text.
+- **Change resolution.** `resolveBillyChange(tool, input, { pseudonymKey })` (or `gateway.resolveChange`, which also leaves out any value holding a piece of that instance's token) validates the input exactly as the call would, the tool's own checks included, and returns what a write call will change before it is sent, for a host that logs the change first: Billy record ids, amounts, currency codes, dates, flags and the number of lines in clear; a number the company chose (contact, product or voucher number) only as a pseudonym (HMAC-SHA-256 with the host's key, else SHA-256); never a name, an address or a text.
 
 ## Threat model
 
@@ -170,9 +172,8 @@ the yardstick for every change that touches errors, results or audit.
 
 **Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway
 (`./gateway`), the surface a multi-tenant host uses. The standalone MCP
-server, configured from the environment for one key, keeps best-effort
-redaction: its errors and audit records are redacted with its key, but it is
-not held to these guarantees.
+server, configured from the environment for one key, applies the same
+redaction and the same last leak check to its results and errors.
 
 **Guaranteed:**
 
@@ -215,9 +216,14 @@ accepts only printable ASCII (0x21-0x7E) of at least 16 characters, checked
 before anything is built from the key. As a cheap first filter it also
 refuses a key that shares a piece of 6 characters with a string literal in
 `src/` (`src/fixed-corpus.generated.ts`, kept up to date by a test). The
-refusal is a fixed text that never repeats the key. The standalone MCP server applies the same redaction to errors
-and audit records on a best-effort basis; its successful results are passed
-on as the API returned them.
+refusal is a fixed text that never repeats the key. The standalone MCP server redacts its results, errors and audit records
+with its token and withholds a result that still holds a piece of it, as
+the gateway does.
+
+**Rejected calls.** A call refused before it runs (an unknown tool or
+invalid input) is audited with a fixed code (`unknown_tool`,
+`invalid_input`), the argument names the tool's schema knows and the number
+of other arguments. An unknown tool name is recorded only as a pseudonym.
 
 ## Security model
 

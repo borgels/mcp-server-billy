@@ -30,8 +30,8 @@ const LONG_KEY = `long-${'k'.repeat(250)}`;
 
 function routes() {
   return stubFetch({
-    [`GET ${BASE}/contacts/i1`]: { body: { id: 'i1' } },
-    [`POST ${BASE}/contacts`]: { body: { id: 'new' } },
+    [`GET ${BASE}/contacts/i1`]: { body: { contact: { id: 'i1' } } },
+    [`POST ${BASE}/contacts`]: { body: { contacts: [{ id: 'new' }] } },
   });
 }
 
@@ -53,7 +53,7 @@ function heldFetch() {
     keys.push(String((init?.headers as Record<string, string> | undefined)?.[API_KEY_HEADER] ?? ''));
     signalStarted();
     await gate;
-    return json({ id: 'i1' });
+    return json({ contact: { id: 'i1' } });
   }) as unknown as typeof fetch;
   return { fetchImpl, release, started, keys };
 }
@@ -158,7 +158,7 @@ describe('call scopes', () => {
     let fromInside: { isError?: boolean } | undefined;
     const fetchA = (async () => {
       fromInside = await b.callTool('create_contact', { name: 'n', countryId: 'DK' });
-      return json({ id: 'new' });
+      return json({ contacts: [{ id: 'new' }] });
     }) as unknown as typeof fetch;
     const a = createBillyGateway({ accessToken: KEY_A, baseUrl: BASE, fetchImpl: fetchA });
     expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK' })).isError).toBeUndefined();
@@ -181,7 +181,7 @@ describe('call scopes', () => {
     };
     const fetchA = (async () => {
       tryCreate('fetch');
-      return json({ id: 'i1' });
+      return json({ contact: { id: 'i1' } });
     }) as unknown as typeof fetch;
     const a = createBillyGateway({
       accessToken: KEY_A,

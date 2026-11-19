@@ -110,7 +110,7 @@ describe('the sink check', () => {
 const asContact =
   (body: unknown): typeof fetch =>
   async (_input, init) =>
-    init?.method === 'POST' ? json({ contacts: [{ name: body }] }, 201) : json({ contact: { name: body } });
+    init?.method === 'POST' ? json({ contacts: [{ id: 'new', name: body }] }, 201) : json({ contact: { name: body } });
 
 describe('failure texts', () => {
   it('replaces texts in failure lists of a successful answer, for reads and writes', async () => {

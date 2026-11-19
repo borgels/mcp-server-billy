@@ -26,8 +26,8 @@ const KEY = `tenant-${'x'.repeat(12)}`;
 
 function routes() {
   return stubFetch({
-    [`GET ${BASE}/contacts/i1`]: { body: { id: 'i1' } },
-    [`POST ${BASE}/contacts`]: { body: { id: 'new' } },
+    [`GET ${BASE}/contacts/i1`]: { body: { contact: { id: 'i1' } } },
+    [`POST ${BASE}/contacts`]: { body: { contacts: [{ id: 'new' }] } },
   });
 }
 

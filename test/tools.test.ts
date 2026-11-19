@@ -40,7 +40,7 @@ describe('MCP tool surface', () => {
   });
 
   it('runs the read tool and labels upstream content as data', async () => {
-    const { mcpClient, fetchImpl } = await connect({ [`GET ${BASE}/contacts/i1`]: { body: item } });
+    const { mcpClient, fetchImpl } = await connect({ [`GET ${BASE}/contacts/i1`]: { body: { contact: item } } });
     const result = await mcpClient.callTool({ name: 'billy_get_contact', arguments: { contactId: 'i1' } });
     expect(result.isError).toBeFalsy();
     const [json, note] = texts(result);
@@ -99,14 +99,14 @@ describe('MCP tool surface', () => {
     expect(() => createBillyGateway({ accessToken: 'tttt-gggg-wwww-vvvv-1', baseUrl: BASE })).toThrow('BILLY_AUDIT_LOG');
 
     // The HTTP transport creates a server per request: read tools keep working.
-    const { mcpClient } = await connect({ [`GET ${BASE}/contacts/i1`]: { body: item } });
+    const { mcpClient } = await connect({ [`GET ${BASE}/contacts/i1`]: { body: { contact: item } } });
     const result = await mcpClient.callTool({ name: 'billy_get_contact', arguments: { contactId: 'i1' } });
     expect(result.isError).toBeFalsy();
   });
 
   it('fails closed when the audit log cannot be written before a write', async () => {
     process.env.BILLY_ENABLE_WRITES = 'true';
-    const { mcpClient, fetchImpl } = await connect({ [`POST ${BASE}/contacts`]: { body: item } });
+    const { mcpClient, fetchImpl } = await connect({ [`POST ${BASE}/contacts`]: { body: { contacts: [item] } } });
     // The log becomes unwritable after startup.
     process.env.BILLY_AUDIT_LOG = join(dir, 'missing-dir', 'audit.jsonl');
     const result = await mcpClient.callTool({ name: 'billy_create_contact', arguments: { name: 'x', countryId: 'DK' } });
@@ -202,7 +202,7 @@ describe('gateway export', () => {
 
   it('validates input, applies the policy and records the caller', async () => {
     process.env.BILLY_AUDIT_LOG = join(dir, 'audit.jsonl');
-    const { gw, fetchImpl } = gateway({ [`GET ${BASE}/contacts/i1`]: { body: item } });
+    const { gw, fetchImpl } = gateway({ [`GET ${BASE}/contacts/i1`]: { body: { contact: item } } });
 
     const ok = await gw.callTool('get_contact', { contactId: 'i1' }, { caller: 'user@vendor.test', requestId: 'req-1' });
     expect(ok.isError).toBeUndefined();

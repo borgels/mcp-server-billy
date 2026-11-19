@@ -176,6 +176,8 @@ describe('writes', () => {
     const result = await call(gw, 'create_draft_invoice', {
       contactId: 'c1',
       entryDate: '2026-11-19',
+      currencyId: 'DKK',
+      paymentTermsDays: 8,
       lines: [
         { productId: 'p1', unitPrice: 100, quantity: 2 },
         { productId: 'p2', unitPrice: 50, description: 'Kørsel' },
@@ -186,6 +188,8 @@ describe('writes', () => {
       invoice: {
         contactId: 'c1',
         entryDate: '2026-11-19',
+        currencyId: 'DKK',
+        paymentTermsDays: 8,
         state: 'draft',
         lines: [
           { productId: 'p1', unitPrice: 100, quantity: 2, priority: 1 },
@@ -213,7 +217,7 @@ describe('writes', () => {
   });
 
   const paymentRoutes = (invoice: Record<string, unknown>, account: Record<string, unknown>) => ({
-    'GET /invoices/i1': { invoice: { id: 'i1', state: 'approved', isPaid: false, balance: 1250, currencyId: 'DKK', ...invoice } },
+    'GET /invoices/i1': { invoice: { id: 'i1', type: 'invoice', state: 'approved', isPaid: false, balance: 1250, currencyId: 'DKK', ...invoice } },
     'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK', ...account } },
     'POST /bankPayments': { bankPayments: [{ id: 'bp1', cashAmount: 1250, cashSide: 'debit', cashAccountId: 'a1', entryDate: '2026-11-19' }] },
   });
@@ -347,5 +351,93 @@ describe('change resolution for a host log', () => {
 
   it('marks only register_payment as needing a person to confirm', () => {
     expect(billyToolCatalog.filter(entry => entry.requiresConfirmation).map(entry => entry.name)).toEqual(['register_payment']);
+  });
+});
+
+describe('after review', () => {
+  it('registers one payment at a time per document, so two calls cannot both pass the balance check', async () => {
+    let balance = 100;
+    const { gw, calls } = billy({
+      'GET /invoices/i1': () => ({
+        invoice: { id: 'i1', type: 'invoice', state: 'approved', isPaid: balance <= 0, balance, currencyId: 'DKK' },
+      }),
+      'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } },
+      'POST /bankPayments': () => {
+        balance -= 100;
+        return { bankPayments: [{ id: `bp${balance}` }] };
+      },
+    });
+    const input = { invoiceId: 'i1', cashAccountId: 'a1', amount: 100, entryDate: '2026-11-19' };
+    const [first, second] = await Promise.all([call(gw, 'register_payment', input), call(gw, 'register_payment', input)]);
+    expect([first.isError, second.isError]).toEqual([undefined, true]);
+    expect(calls.filter(c => c.method === 'POST')).toHaveLength(1);
+  });
+
+  it.each([
+    ['a credit note', { type: 'creditNote' }, {}],
+    ['a missing type', { type: undefined }, {}],
+    ['a negative balance', { balance: -100 }, {}],
+    ['an unknown invoice currency', { currencyId: undefined }, {}],
+    ['an unknown account currency', {}, { currencyId: undefined }],
+    ['an invalid currency', {}, { currencyId: 'dkk' }],
+  ])('refuses a payment with %s', async (_name, invoice, account) => {
+    const { gw, calls } = billy({
+      'GET /invoices/i1': { invoice: { id: 'i1', type: 'invoice', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK', ...invoice } },
+      'GET /accounts/a1': { account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK', ...account } },
+      'POST /bankPayments': { bankPayments: [{ id: 'bp' }] },
+    });
+    const result = await call(gw, 'register_payment', { invoiceId: 'i1', cashAccountId: 'a1', amount: 50, entryDate: '2026-11-19' });
+    expect(result.isError).toBe(true);
+    expect(calls.some(c => c.method === 'POST')).toBe(false);
+  });
+
+  it('refuses an answer without the documented root key, and a write answer without the changed record', async () => {
+    const html = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: async () => new Response('<html>login</html>', { headers: { 'content-type': 'text/html' } }),
+    });
+    const check = await html.callTool('check_connection', {});
+    expect(check.isError).toBe(true);
+    expect(check.content[0]?.text).toContain('without the expected data');
+
+    const { gw } = billy({ 'POST /contacts': { contacts: [] }, 'GET /invoices': { meta: {} } });
+    expect((await call(gw, 'create_contact', { name: 'X', countryId: 'DK' })).isError).toBe(true);
+    expect((await call(gw, 'list_invoices', {})).isError).toBe(true);
+  });
+
+  it('logs a rejected call with a fixed code, known field names and a pseudonym for an unknown tool', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({})) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }) },
+    });
+    await gw.callTool('Jens Jensen', { 'Anna Hansen': 1 });
+    await gw.callTool('get_contact', { contactId: 'c1', 'Anna Hansen': 1 });
+    const text = JSON.stringify(records);
+    expect(text).not.toMatch(/Jens|Anna/);
+    expect(records[0]).toMatchObject({ tool: 'unknown', action: 'rejected', reason: 'unknown_tool', target: { fields: [], otherFields: 1 } });
+    expect((records[0]?.target as Record<string, unknown>).toolPseudonym).toMatch(/^sha256:[0-9a-f]{16}$/);
+    expect(records[1]).toMatchObject({ tool: 'billy_get_contact', reason: 'invalid_input', target: { fields: ['contactId'], otherFields: 1 } });
+  });
+
+  it('resolves a change only for input that would run, and an instance leaves its own token out', () => {
+    expect(resolveBillyChange('register_payment', { invoiceId: 'i1', billId: 'b1', cashAccountId: 'a1', amount: 1, entryDate: '2026-11-19' }).ok).toBe(false);
+    expect(resolveBillyChange('update_contact', { contactId: 'c1' }).ok).toBe(false);
+    const token = 'tokenlike-0123456789abcdefXYZ';
+    const gw = createBillyGateway({ accessToken: token, baseUrl: BASE });
+    const resolved = gw.resolveChange('update_contact', { contactId: token, phone: '1' });
+    expect(resolved.ok && resolved.change.values).toEqual({});
+    expect(JSON.stringify(resolved)).not.toContain('0123456789');
+  });
+
+  it('sends the token only to the exact documented hosts, not their subdomains', () => {
+    for (const baseUrl of ['https://unlisted.api.billy.dk/v2', 'https://x.api.billysbilling.com/v2']) {
+      expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl, policy: {} }), baseUrl).toThrow();
+    }
+    expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl: 'https://api.billy.dk/v2', policy: {} })).not.toThrow();
   });
 });

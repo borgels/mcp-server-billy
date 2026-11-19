@@ -9,7 +9,9 @@ import {
 } from '../billy/annotations.js';
 import { assertAuditLogWritable, auditTarget, newRequestId, writeAuditEvent } from '../billy/audit.js';
 import { readOnlyClient, type UpstreamClient } from '../billy/client.js';
-import { formatUnknownError, type SecretRedactor } from '../errors.js';
+import { formatUnknownError, redactDeep, type SecretRedactor } from '../errors.js';
+import { withheldResult } from '../fallbacks.js';
+import { leaksSecret } from '../key-admission.js';
 import {
   approveInvoice,
   BILL_FILTERS,
@@ -541,12 +543,12 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'billy_create_draft_invoice',
     title: 'Create draft invoice (Billy)',
-    description: `Create an invoice as a draft, with lines from products. It is not approved (booked), e-mailed or sent; a draft can still be changed or deleted in Billy. Billy numbers the invoice when it is approved. ${WRITE_NOTE}`,
+    description: `Create an invoice as a draft, with lines from products. It is not approved (booked), e-mailed or sent; a draft can still be changed or deleted in Billy. Billy gives it a number from the company's invoice number model when it is created. ${WRITE_NOTE}`,
     inputShape: {
       contactId: recordId('The customer id, from list_contacts.'),
       entryDate: dateSchema.describe('Invoice date, YYYY-MM-DD.'),
-      currencyId: currencySchema.optional().describe("ISO 4217 currency code (default: the company's base currency)."),
-      paymentTermsDays: z.number().int().min(-365).max(365).optional().describe("Payment terms in days (default: the customer's or the company's)."),
+      currencyId: currencySchema.describe('ISO 4217 currency code of the invoice, e.g. DKK (get_organization gives the base currency).'),
+      paymentTermsDays: z.number().int().min(-365).max(365).describe('Payment terms in days (get_contact gives the customer\'s).'),
       taxMode: z.enum(['incl', 'excl']).optional().describe('Unit prices include (incl) or exclude (excl) VAT. Default: the company setting.'),
       contactMessage: text(2000).optional().describe('Message to the customer at the top of the invoice.'),
       lines: z
@@ -572,7 +574,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'billy_approve_invoice',
     title: 'Approve draft invoice (Billy)',
-    description: `Approve (book) a draft invoice. Reads it first and refuses unless it is a draft. Billy then books it and gives it its number; an approved invoice cannot be returned to draft, only credited. It is not e-mailed or sent as an e-invoice. ${WRITE_NOTE}`,
+    description: `Approve (book) a draft invoice. Reads it first and refuses unless it is a draft. Billy then books it; an approved invoice cannot be returned to draft, only credited. It is not e-mailed or sent as an e-invoice. ${WRITE_NOTE}`,
     inputShape: { invoiceId: recordId('The id of the draft invoice.') },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
@@ -587,7 +589,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'billy_register_payment',
     title: 'Register payment (Billy)',
-    description: `Register in the books that an approved invoice was paid (money in) or a bill was paid (money out), on a payment account. It moves no money. Reads the invoice or bill and the account first, and refuses when it is not approved, already paid, the amount is more than what is owed, or the account is not a payment account in the same currency. A person should confirm each call. ${WRITE_NOTE}`,
+    description: `Register in the books that an approved invoice was paid (money in) or a bill was paid (money out), on a payment account. It moves no money. Reads the invoice or bill and the account first, and refuses when it is not approved, already paid, a credit note, has no positive balance, the amount is more than what is owed, the currency is unknown, or the account is not a payment account in the same currency. Registrations of one document run one at a time in this server; a payment registered in Billy by someone else at the same moment is not seen. A person should confirm each call. ${WRITE_NOTE}`,
     inputShape: {
       invoiceId: recordId('The invoice that was paid. Give this or billId.').optional(),
       billId: recordId('The bill that was paid. Give this or invoiceId.').optional(),
@@ -653,6 +655,18 @@ export const BILLY_TOOLS: ToolDefinition[] = [
     handler: async (client, input) => createDaybookTransaction(client, input),
   }),
 ];
+
+/**
+ * Validate a write call's input exactly as executeTool does before it sends
+ * anything: the strict schema, then the tool's own cross-field check. Used
+ * by the change resolution, so a call it accepts is one that would run.
+ */
+export function validateCall(tool: ToolDefinition, input: unknown): { ok: true; data: Record<string, unknown> } | { ok: false } {
+  const parsed = tool.inputSchema.safeParse(input ?? {});
+  if (!parsed.success) return { ok: false };
+  const data = parsed.data as Record<string, unknown>;
+  return tool.check?.(data) ? { ok: false } : { ok: true, data };
+}
 
 export function findTool(name: string): ToolDefinition | undefined {
   return BILLY_TOOLS.find(tool => tool.name === name);
@@ -732,16 +746,19 @@ export function registerTools(server: McpServer, client: RedactingClient): void 
         annotations: tool.annotations,
       },
       async (input: Record<string, unknown>) => {
+        let result: { content: Array<{ type: 'text'; text: string }>; isError?: true };
         try {
           // In a scope with this server's redactor, like a gateway call: audit records and context are redacted.
-          return mcpToolResult(tool, await runInCallScope({ redactor: client.redactor }, () => executeTool(tool, client, input)));
+          const data = await runInCallScope({ redactor: client.redactor }, () => executeTool(tool, client, input));
+          // Billy data can echo the token, in values or in object keys: redacted as data before it is serialised (a
+          // serialised token is escaped and no longer matches), as on the gateway.
+          result = mcpToolResult(tool, redactDeep(redactDeep(data, client.redactor), client.redactor));
         } catch (error) {
           // Central redaction with this instance's secrets: no error text reaches the client unredacted.
-          return {
-            isError: true,
-            content: [{ type: 'text' as const, text: formatUnknownError(error, client.redactor) }],
-          };
+          result = { isError: true, content: [{ type: 'text' as const, text: formatUnknownError(error, client.redactor) }] };
         }
+        // The same last check as the gateway: a result that still holds a piece of the token is withheld whole.
+        return leaksSecret(result, client.redactor) ? withheldResult() : result;
       },
     );
   }
@@ -831,31 +848,39 @@ export async function executeTool(
   }
 }
 
-const MAX_REJECTED_FIELDS = 20;
-const MAX_REJECTED_FIELD_LENGTH = 64;
+/** Why a call was rejected before it ran: a fixed code, never text from the caller. */
+export type RejectionCode = 'unknown_tool' | 'invalid_input';
 
-/** Audit a call rejected before execution (unknown tool or invalid input); field names only. */
+/**
+ * Audit a call rejected before execution (unknown tool or invalid input).
+ * The record holds only what we wrote: a known tool name (an unknown one is
+ * recorded as `unknown` with a pseudonym of what was given), the argument
+ * names that the tool's schema knows, the number of other arguments, and a
+ * fixed code. A caller can put a name or a text anywhere, so nothing it
+ * chose is logged in clear.
+ */
 export async function auditRejectedCall(
   toolName: string,
   input: unknown,
-  reason: string,
+  code: RejectionCode,
   context?: unknown,
 ): Promise<void> {
   const { requestId, caller } = normaliseCallContext(context);
-  const fields =
-    input && typeof input === 'object' && !Array.isArray(input)
-      ? Object.keys(input)
-          .sort()
-          .slice(0, MAX_REJECTED_FIELDS)
-          .map(key => redactInScope(key).slice(0, MAX_REJECTED_FIELD_LENGTH))
-      : [];
+  const tool = typeof toolName === 'string' ? findTool(toolName) : undefined;
+  const known = new Set(tool ? Object.keys(tool.inputShape) : []);
+  const keys = input && typeof input === 'object' && !Array.isArray(input) ? Object.keys(input) : [];
+  const fields = keys.filter(key => known.has(key)).sort();
   await writeAuditEvent({
     requestId,
-    tool: redactInScope(toolName).slice(0, 100),
+    tool: tool ? tool.name : 'unknown',
     caller,
     action: 'rejected',
-    target: { fields },
-    reason: redactInScope(reason).slice(0, 200),
+    target: {
+      ...(tool ? {} : { toolPseudonym: pseudonym(String(toolName).slice(0, 200)) }),
+      fields,
+      otherFields: keys.length - fields.length,
+    },
+    reason: code,
   });
 }
 

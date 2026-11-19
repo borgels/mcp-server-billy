@@ -1,7 +1,7 @@
 import { nestedFailuresAsStatus } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
 import type { QueryValue, UpstreamClient } from './client.js';
-import { lastFour } from './values.js';
+import { isCurrency, lastFour } from './values.js';
 
 /**
  * Calls to Billy's API v2 (https://www.billy.dk/api). Conventions from the
@@ -44,17 +44,37 @@ function pick(record: Json, fields: readonly string[]): Json {
   return out;
 }
 
-/** The record under a singular root key, or the body itself when the key is missing. */
-function single(body: unknown, key: string): Json {
-  const root = asRecord(body) ?? {};
-  return asRecord(root[key]) ?? root;
+/** An answer from Billy that is not shaped as the documentation says: our own text, nothing of the answer. */
+export class UnexpectedAnswerError extends Error {
+  constructor() {
+    super('Billy answered without the expected data. Nothing in the answer was used.');
+    this.name = 'UnexpectedAnswerError';
+  }
 }
 
-/** The first record under a plural root key of a create or update answer. */
+/** The record under a singular root key (`{ invoice: {...} }`). Anything else is refused. */
+function single(body: unknown, key: string): Json {
+  const record = asRecord(asRecord(body)?.[key]);
+  if (!record) throw new UnexpectedAnswerError();
+  return record;
+}
+
+/** The list under a plural root key (`{ invoices: [...] }`). Anything else is refused. */
+function list(body: unknown, key: string): Json[] {
+  const value = asRecord(body)?.[key];
+  if (!Array.isArray(value)) throw new UnexpectedAnswerError();
+  return asArray(value);
+}
+
+/**
+ * The record a create or update made, from the plural root key of the
+ * answer: the first one with a string id. An answer without one is refused,
+ * so a write is never reported as done without the record it made.
+ */
 function firstChanged(body: unknown, key: string): Json {
-  const root = asRecord(body) ?? {};
-  const list = asArray(root[key]);
-  return list[0] ?? root;
+  const changed = list(body, key).find(record => typeof record.id === 'string' && record.id !== '');
+  if (!changed) throw new UnexpectedAnswerError();
+  return changed;
 }
 
 function paging(body: unknown): Json | undefined {
@@ -125,11 +145,11 @@ async function scanAll(
   const records: Json[] = [];
   for (let page = 1; records.length < MAX_SCAN_RECORDS; page += 1) {
     const body = await get(client, path, { ...query, page, pageSize: MAX_PAGE_SIZE });
-    const list = asArray(asRecord(body)?.[key]);
-    records.push(...list);
+    const page_ = list(body, key);
+    records.push(...page_);
     const meta = paging(body);
     const pageCount = typeof meta?.pageCount === 'number' ? meta.pageCount : page;
-    if (list.length === 0 || page >= pageCount) return { records, complete: true };
+    if (page_.length === 0 || page >= pageCount) return { records, complete: true };
   }
   return { records: records.slice(0, MAX_SCAN_RECORDS), complete: false };
 }
@@ -419,7 +439,7 @@ export const INVOICE_FILTERS = [
 export async function listInvoices(client: UpstreamClient, input: Json): Promise<Json> {
   const body = await get(client, '/invoices', listQuery(input, INVOICE_FILTERS));
   return {
-    invoices: asArray(asRecord(body)?.invoices).map(invoice => pick(invoice, INVOICE_ROW)),
+    invoices: list(body, 'invoices').map(invoice => pick(invoice, INVOICE_ROW)),
     paging: paging(body) ?? null,
   };
 }
@@ -467,7 +487,7 @@ export const BILL_FILTERS = [
 
 export async function listBills(client: UpstreamClient, input: Json): Promise<Json> {
   const body = await get(client, '/bills', listQuery(input, BILL_FILTERS));
-  return { bills: asArray(asRecord(body)?.bills).map(bill => pick(bill, BILL_ROW)), paging: paging(body) ?? null };
+  return { bills: list(body, 'bills').map(bill => pick(bill, BILL_ROW)), paging: paging(body) ?? null };
 }
 
 export async function getBill(client: UpstreamClient, input: { billId: string }): Promise<Json> {
@@ -548,43 +568,71 @@ export interface PaymentInput {
 export async function registerPayment(client: UpstreamClient, input: PaymentInput): Promise<Json> {
   const isInvoice = input.invoiceId !== undefined;
   const subjectId = (isInvoice ? input.invoiceId : input.billId) as string;
-  const subject = isInvoice
-    ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice')
-    : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill');
   const kind = isInvoice ? 'invoice' : 'bill';
-  if (subject.state !== 'approved') throw new Error(`Refused: the ${kind} is not approved. Nothing was sent.`);
-  if (subject.isPaid === true) throw new Error(`Refused: the ${kind} is already paid. Nothing was sent.`);
-  const balance = typeof subject.balance === 'number' ? Math.abs(subject.balance) : undefined;
-  if (balance === undefined || input.amount > balance + 0.005) {
-    throw new Error(`Refused: the amount is more than the ${kind}'s outstanding balance. Nothing was sent.`);
+  // One registration at a time per company and document in this process: the balance is read again after the
+  // previous one has finished, so two calls cannot both pass the check against the same balance.
+  return serialised(`${client.lockScope()}:${kind}:${subjectId}`, async () => {
+    const subject = isInvoice
+      ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice')
+      : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill');
+    if (subject.state !== 'approved') throw new Error(`Refused: the ${kind} is not approved. Nothing was sent.`);
+    if (subject.isPaid === true) throw new Error(`Refused: the ${kind} is already paid. Nothing was sent.`);
+    // Credit notes are refused: a payment here is always money in for an invoice and money out for a bill.
+    if (isInvoice ? subject.type !== 'invoice' : subject.type !== undefined && subject.type !== 'bill') {
+      throw new Error(`Refused: this is not an ordinary ${kind} (a credit note, or a type this server does not know). Nothing was sent.`);
+    }
+    if (typeof subject.balance !== 'number' || !Number.isFinite(subject.balance) || subject.balance <= 0) {
+      throw new Error(`Refused: the ${kind} has no positive outstanding balance. Nothing was sent.`);
+    }
+    if (input.amount > subject.balance + 0.005) {
+      throw new Error(`Refused: the amount is more than the ${kind}'s outstanding balance. Nothing was sent.`);
+    }
+    const account = single(await get(client, idPath('accounts', input.cashAccountId, 'cashAccountId')), 'account');
+    if (account.isPaymentEnabled !== true) {
+      throw new Error('Refused: the account is not set up for payments in Billy (isPaymentEnabled). Nothing was sent.');
+    }
+    if (!isCurrency(account.currencyId) || !isCurrency(subject.currencyId)) {
+      throw new Error(`Refused: the currency of the account or the ${kind} is not known. Nothing was sent.`);
+    }
+    if (account.currencyId !== subject.currencyId) {
+      throw new Error(`Refused: the account and the ${kind} are in different currencies. Nothing was sent.`);
+    }
+    const bankPayment = {
+      entryDate: input.entryDate,
+      cashAmount: input.amount,
+      cashSide: isInvoice ? 'debit' : 'credit',
+      cashAccountId: input.cashAccountId,
+      associations: [{ subjectReference: `${kind}:${subjectId}` }],
+    };
+    const body = nestedFailuresAsStatus(await client.post('/bankPayments', { bankPayment }));
+    return {
+      bankPayment: pick(firstChanged(body, 'bankPayments'), [
+        'id',
+        'contactId',
+        'entryDate',
+        'cashAmount',
+        'cashSide',
+        'cashAccountId',
+        'subjectCurrencyId',
+        'isVoided',
+      ]),
+    };
+  });
+}
+
+/** Work in flight per key, in this process only. A key holds no secret (see lockScope) and is dropped when done. */
+const inFlight = new Map<string, Promise<unknown>>();
+
+async function serialised<T>(key: string, work: () => Promise<T>): Promise<T> {
+  const before = inFlight.get(key) ?? Promise.resolve();
+  const run = before.catch(() => undefined).then(work);
+  const tail = run.catch(() => undefined);
+  inFlight.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (inFlight.get(key) === tail) inFlight.delete(key);
   }
-  const account = single(await get(client, idPath('accounts', input.cashAccountId, 'cashAccountId')), 'account');
-  if (account.isPaymentEnabled !== true) {
-    throw new Error('Refused: the account is not set up for payments in Billy (isPaymentEnabled). Nothing was sent.');
-  }
-  if (typeof account.currencyId === 'string' && typeof subject.currencyId === 'string' && account.currencyId !== subject.currencyId) {
-    throw new Error(`Refused: the account and the ${kind} are in different currencies. Nothing was sent.`);
-  }
-  const bankPayment = {
-    entryDate: input.entryDate,
-    cashAmount: input.amount,
-    cashSide: isInvoice ? 'debit' : 'credit',
-    cashAccountId: input.cashAccountId,
-    associations: [{ subjectReference: `${kind}:${subjectId}` }],
-  };
-  const body = nestedFailuresAsStatus(await client.post('/bankPayments', { bankPayment }));
-  return {
-    bankPayment: pick(firstChanged(body, 'bankPayments'), [
-      'id',
-      'contactId',
-      'entryDate',
-      'cashAmount',
-      'cashSide',
-      'cashAccountId',
-      'subjectCurrencyId',
-      'isVoided',
-    ]),
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -647,7 +695,7 @@ const POSTING_FIELDS = [
 
 export async function listPostings(client: UpstreamClient, input: Json): Promise<Json> {
   const body = await get(client, '/postings', listQuery(input, POSTING_FILTERS));
-  return { postings: asArray(asRecord(body)?.postings).map(posting => pick(posting, POSTING_FIELDS)), paging: paging(body) ?? null };
+  return { postings: list(body, 'postings').map(posting => pick(posting, POSTING_FIELDS)), paging: paging(body) ?? null };
 }
 
 export async function listDaybooks(client: UpstreamClient): Promise<Json> {
@@ -680,7 +728,7 @@ export async function listDaybookTransactions(client: UpstreamClient, input: Jso
     include: 'daybookTransaction.lines:embed',
   });
   return {
-    daybookTransactions: asArray(asRecord(body)?.daybookTransactions).map(shapeDaybookTransaction),
+    daybookTransactions: list(body, 'daybookTransactions').map(shapeDaybookTransaction),
     paging: paging(body) ?? null,
   };
 }
