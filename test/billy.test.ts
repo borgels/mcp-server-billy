@@ -4,6 +4,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billyToolCatalog, createBillyGateway, resolveBillyChange, type GatewayJsonObject } from '../src/gateway.js';
 import { BASE } from './helpers.js';
+import { logFieldValue } from '../src/tools/billy.js';
 
 const TOKEN = 'tttt-gggg-wwww-vvvv-1';
 const originalEnv = { ...process.env };
@@ -543,7 +544,7 @@ describe('after review 3', () => {
     }
   });
 
-  it('keeps no name or address of the caller in the audit, and replaces a request id that is not an opaque token', async () => {
+  it('keeps no name or address of the caller or the request id in the audit', async () => {
     const records: Array<Record<string, unknown>> = [];
     const gw = createBillyGateway({
       accessToken: TOKEN,
@@ -555,8 +556,129 @@ describe('after review 3', () => {
     await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'req-42' });
     expect(JSON.stringify(records)).not.toMatch(/jens|Jensen|Aarhus/i);
     expect(records[0]?.caller).toMatch(/^hmac:[0-9a-f]{16}$/);
-    expect(records[0]?.requestId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(records.at(-1)?.requestId).toBe('req-42');
+    expect(records[0]?.requestId).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect(records.at(-1)?.requestId).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect(JSON.stringify(records)).not.toContain('req-42');
     expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: 'short' } })).toThrow(/pseudonymKey/);
+  });
+});
+
+describe('after review 4', () => {
+  const PSEUDONYM_KEY = 'host-pseudonym-key-0002';
+  const page = { meta: { paging: { page: 1, pageCount: 1 } } };
+
+  it('refuses an embedded list that is not a list, instead of leaving it out', async () => {
+    const bad: Array<[string, GatewayJsonObject, Record<string, unknown>]> = [
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: { bad: true } } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: 'none' } } }],
+      ['get_bill', { billId: 'b1' }, { 'GET /bills/b1': { bill: { id: 'b1', lines: { bad: true } } } }],
+      ['get_bill', { billId: 'b1' }, { 'GET /bills/b1': { bill: { id: 'b1', lines: 7 } } }],
+      ['list_daybook_transactions', {}, { 'GET /daybookTransactions': { daybookTransactions: [{ id: 't1', lines: { bad: true } }], ...page } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', contactPersons: { bad: true } } } }],
+      ['get_product', { productId: 'p1' }, { 'GET /products/p1': { product: { id: 'p1', prices: { bad: true } } } }],
+    ];
+    for (const [tool, input, routes] of bad) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/bad|none/);
+    }
+    // Absent or null lists are still fine: the record comes without them.
+    for (const lines of [undefined, null]) {
+      const result = await call(billy({ 'GET /invoices/i1': { invoice: { id: 'i1', lines } } }).gw, 'get_invoice', { invoiceId: 'i1' });
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toEqual({ id: 'i1' });
+    }
+  });
+
+  it('refuses a field of another type than documented', async () => {
+    const bad: Array<[string, GatewayJsonObject, Record<string, unknown>]> = [
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', amount: 'invalid' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', isPaid: 'false' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', state: 123 } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: [{ id: 'l1', quantity: '2' }] } } }],
+      ['get_bill', { billId: 'b1' }, { 'GET /bills/b1': { bill: { id: 'b1', balance: '300.00' } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', isCustomer: 1 } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', name: 42 } } }],
+      [
+        'list_daybook_transactions',
+        {},
+        { 'GET /daybookTransactions': { daybookTransactions: [{ id: 't1', lines: [{ id: 'l1', amount: 'NaN' }] }], ...page } },
+      ],
+    ];
+    for (const [tool, input, routes] of bad) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/invalid|NaN/);
+    }
+    const ok = await call(
+      billy({ 'GET /invoices/i1': { invoice: { id: 'i1', invoiceNo: '41', amount: 100, isPaid: false, state: 'approved', dueDate: null } } }).gw,
+      'get_invoice',
+      { invoiceId: 'i1' },
+    );
+    expect(ok.structuredContent).toEqual({ id: 'i1', invoiceNo: '41', amount: 100, isPaid: false, state: 'approved', dueDate: null });
+  });
+
+  it('never keeps a request id from the host in clear, whatever characters it uses', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'c1' } })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY },
+    });
+    // A name with a hyphen, a phone number, a private address and an internal host name: all within the old
+    // character filter. Made up for the test.
+    const given = ['Anne-Marie.Hansen', '+4512345678', '10.0.0.5', 'intra-01.corp.example:8443'];
+    for (const requestId of given) await gw.callTool('get_contact', { contactId: 'c1' }, { requestId });
+    await gw.callTool('get_contact', { contactId: 'c1' });
+    const text = JSON.stringify(records);
+    for (const value of given) expect(text).not.toContain(value);
+    expect(text).not.toMatch(/Anne|4512345678|10\.0\.0|corp/);
+    const ids = records.map(record => record.requestId);
+    for (const id of ids.slice(0, 8)) expect(id).toMatch(/^hmac:[0-9a-f]{16}$/);
+    // The lines of one call share their id; another call does not.
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[0]).not.toBe(ids[2]);
+    // Without a request id the audit makes its own.
+    expect(ids.at(-1)).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('keeps the pseudonym key out of results, audit records and errors', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      maxAttempts: 1,
+      fetchImpl: (async (input: string | URL | Request) =>
+        String(input).includes('/contacts/c1')
+          ? Response.json({ contact: { id: 'c1', name: `Navn ${PSEUDONYM_KEY}` } })
+          : Response.json({ errorMessage: `Fejl ${PSEUDONYM_KEY}` }, { status: 400 })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: PSEUDONYM_KEY },
+    });
+    const results = [await gw.callTool('get_contact', { contactId: 'c1' }), await gw.callTool('get_contact', { contactId: 'c2' })];
+    expect(results[0]?.isError).toBeUndefined();
+    expect(results[1]?.isError).toBe(true);
+    const text = JSON.stringify([results, records]);
+    expect(text).not.toContain(PSEUDONYM_KEY);
+    expect(text).not.toContain(PSEUDONYM_KEY.slice(4, 16));
+  });
+
+  it('keeps a pseudonym key given as bytes out of results', async () => {
+    const bytes = new TextEncoder().encode(PSEUDONYM_KEY);
+    const hex = Buffer.from(bytes).toString('hex');
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'c1', name: PSEUDONYM_KEY, street: hex } })) as typeof fetch,
+      policy: { pseudonymKey: bytes },
+    });
+    const text = JSON.stringify(await gw.callTool('get_contact', { contactId: 'c1' }));
+    expect(text).not.toContain(PSEUDONYM_KEY);
+    expect(text).not.toContain(hex);
+  });
+
+  it('keeps a value with a hyphen as a kind in the log values', () => {
+    expect(logFieldValue('kind', 'on-hold')).toBe('on-hold');
+    expect(logFieldValue('kind', '-x')).toBeUndefined();
   });
 });

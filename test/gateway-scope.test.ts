@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { pseudonym } from '../src/tools/billy.js';
 import { API_KEY_HEADER } from '../src/billy/client.js';
 import { createBillyGateway } from '../src/gateway.js';
 import { BASE, stubFetch, texts } from './helpers.js';
@@ -116,9 +117,9 @@ describe('call scopes', () => {
     // After resuming, A still cannot write: its own policy, not B's.
     expect((await a.callTool('create_contact', { name: 'n', countryId: 'DK', paymentTermsDays: 8 }, { requestId: 'a2' })).isError).toBe(true);
 
-    expect(sinkA.filter(r => r.requestId === 'a').map(r => r.action)).toEqual(['start', 'finish']);
-    expect(new Set(sinkA.map(r => r.requestId))).toEqual(new Set(['a', 'a2']));
-    expect(new Set(sinkB.map(r => r.requestId))).toEqual(new Set(['b1', 'b2']));
+    expect(sinkA.filter(r => r.requestId === pseudonym('a')).map(r => r.action)).toEqual(['start', 'finish']);
+    expect(new Set(sinkA.map(r => r.requestId))).toEqual(new Set([pseudonym('a'), pseudonym('a2')]));
+    expect(new Set(sinkB.map(r => r.requestId))).toEqual(new Set([pseudonym('b1'), pseudonym('b2')]));
   });
 
   it('do not let a call from inside another instance inherit its policy or sink', async () => {
@@ -147,7 +148,7 @@ describe('call scopes', () => {
     expect(fromInside.isError).toBe(true);
     expect(texts(fromInside).join(' ')).toMatch(/BILLY_ENABLE_WRITES/);
     expect(fetchB).not.toHaveBeenCalled();
-    expect(sinkA.every(r => r.requestId === 'a')).toBe(true);
+    expect(sinkA.every(r => r.requestId === pseudonym('a'))).toBe(true);
   });
 
   it('do not let an instance with a policy, called from inside one without, use the environment', async () => {

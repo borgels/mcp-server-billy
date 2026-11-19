@@ -40,6 +40,12 @@ documentation (https://www.billy.dk/api, API v2).
 - After the third review: a record must have the id asked for; an object
   where a value should be, or an embedded entry that is not a record,
   refuses the answer; the audit keeps the caller only as a pseudonym
-  (`policy.pseudonymKey`) and a request id only when it is an opaque token.
+  (`policy.pseudonymKey`).
+- After the fourth review: the request id is kept only as a pseudonym too,
+  and the pseudonym key is redacted like the access token. An embedded list
+  (lines, contact persons, prices) that is there but is not a list refuses
+  the answer instead of being left out, and every field passed on must have
+  the type of Billy's property tables (amounts and counts numbers, flags
+  booleans, the rest strings; null allowed).
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.

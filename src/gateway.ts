@@ -329,6 +329,18 @@ export function createBillyGateway(options: BillyGatewayOptions) {
   }
 }
 
+/** Register a key given as text or bytes, in every form it could be written. */
+function addKeyMaterial(redactor: SecretRedactor, key: string | Uint8Array): void {
+  if (typeof key === 'string') {
+    redactor.addSecret(key);
+    return;
+  }
+  const bytes = Buffer.from(key);
+  for (const form of [bytes.toString('utf8'), bytes.toString('latin1'), bytes.toString('hex'), bytes.toString('base64'), bytes.toString('base64url')]) {
+    redactor.addSecret(form);
+  }
+}
+
 function buildGateway(options: BillyGatewayOptions, accessToken: string) {
   const { policy: hostPolicy, ...clientOptions } = options;
   const baseUrl = typeof options.baseUrl === 'string' && options.baseUrl.trim() !== '' ? options.baseUrl.trim() : DEFAULT_BASE_URL;
@@ -348,6 +360,8 @@ function buildGateway(options: BillyGatewayOptions, accessToken: string) {
     ...(policy ? { allowCustomBaseUrl: clientOptions.allowCustomBaseUrl ?? false } : {}),
   });
   const redactor: SecretRedactor = client.redactor;
+  // The host's pseudonym key is a secret like the access token: kept out of results, logs and errors.
+  if (policy?.pseudonymKey !== undefined) addKeyMaterial(redactor, policy.pseudonymKey);
   // Every call in a scope of its own, with or without a host policy: a call made from inside another
   // instance's call (its audit sink or its fetch) never runs under that instance's policy, sink or redactor.
   const underPolicy = <T>(work: () => T): T => runInCallScope(policy ? { policy, redactor } : { redactor }, work);

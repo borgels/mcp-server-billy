@@ -220,7 +220,7 @@ refusal is a fixed text that never repeats the key. The standalone MCP server re
 with its token and withholds a result that still holds a piece of it, as
 the gateway does.
 
-**Call context in the audit.** The `caller` a host passes is never logged in clear: it becomes a pseudonym (HMAC-SHA-256 with `policy.pseudonymKey`, at least 16 characters, else SHA-256). A `requestId` is kept only when it is an opaque token (letters, digits, `.`, `_`, `:`, `-`, at most 128 characters); anything else is replaced by a new id.
+**Call context in the audit.** The `caller` a host passes is never logged in clear: it becomes a pseudonym (HMAC-SHA-256 with `policy.pseudonymKey`, at least 16 characters, else SHA-256). Nor is a `requestId`: any text can hold a name, a phone number or an address, so the audit keeps its pseudonym the same way, which still ties the lines of one call together for a host that knows the key; without one the audit makes its own id. The pseudonym key is a secret of the instance like the access token: it is redacted from results, audit records and errors.
 
 **Rejected calls.** A call refused before it runs (an unknown tool or
 invalid input) is audited with a fixed code (`unknown_tool`,

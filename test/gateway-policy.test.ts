@@ -1,4 +1,5 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { pseudonym } from '../src/tools/billy.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -101,8 +102,8 @@ describe('instance policy from the host', () => {
     });
     await gw.callTool('get_contact', { contactId: 'i1' }, { requestId: 'r1', caller: 'person-1' });
     expect(records.map(r => [r.requestId, r.action, r.caller])).toEqual([
-      ['r1', 'start', expect.stringMatching(/^sha256:[0-9a-f]{16}$/)],
-      ['r1', 'finish', expect.stringMatching(/^sha256:[0-9a-f]{16}$/)],
+      [pseudonym('r1'), 'start', expect.stringMatching(/^sha256:[0-9a-f]{16}$/)],
+      [pseudonym('r1'), 'finish', expect.stringMatching(/^sha256:[0-9a-f]{16}$/)],
     ]);
 
     const fetchImpl = routes();

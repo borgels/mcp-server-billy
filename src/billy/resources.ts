@@ -31,27 +31,101 @@ function asRecord(value: unknown): Json | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Json) : undefined;
 }
 
-/** The records of an embedded list (lines, contact persons, prices). An entry that is not a record refuses the answer. */
-function asArray(value: unknown): Json[] {
-  if (value === undefined || value === null) return [];
+/**
+ * The records of an embedded list (lines, contact persons, prices) when the
+ * answer has one: undefined when the field is absent or null, the records
+ * when it is a list. Anything else in its place (an object, a text), or an
+ * entry that is not a record, refuses the answer: a list is never left out
+ * without a word.
+ */
+function embedded(value: unknown): Json[] | undefined {
+  if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value)) throw new UnexpectedAnswerError();
   const records = value.map(asRecord);
   if (records.some(entry => entry === undefined)) throw new UnexpectedAnswerError();
   return records as Json[];
 }
 
-/** The fields of `record` that are listed, in that order, leaving out absent ones. */
+/**
+ * The type of each field this server passes on, from the property tables of
+ * Billy's API v2 documentation (https://www.billy.dk/api): amounts, rates,
+ * counts and paging are numbers, `is*`, `has*` and `appliesTo*` are
+ * booleans, an account's `accountNo` is an integer, everything else (ids,
+ * dates, numbers the company chose, states, modes, names, texts) is a
+ * string. `invoiceNo` is a string in the property table and an integer in
+ * the examples, so both are taken. Any field may be null.
+ */
+const STRING_OR_NUMBER_FIELDS = new Set(['invoiceNo']);
+const NUMBER_FIELDS = new Set([
+  'cashAmount',
+  'cashExchangeRate',
+  'feeAmount',
+  'accountNo',
+  'amount',
+  'balance',
+  'tax',
+  'unitPrice',
+  'quantity',
+  'discountValue',
+  'exchangeRate',
+  'rate',
+  'priority',
+  'paymentTermsDays',
+  'fiscalYearEndMonth',
+  'page',
+  'pageCount',
+  'pageSize',
+  'total',
+]);
+const BOOLEAN_FIELDS = new Set([
+  'hasVat',
+  'isActive',
+  'isArchived',
+  'isBankAccount',
+  'isBankMatched',
+  'isBare',
+  'isCustomer',
+  'isLocked',
+  'isPaid',
+  'isPaymentEnabled',
+  'isPrimary',
+  'isSupplier',
+  'isTerminated',
+  'isTrial',
+  'isVoided',
+  'appliesToPurchases',
+  'appliesToSales',
+]);
+
+/** Whether `value` has the documented type of `field` (or is null). */
+function hasFieldType(field: string, value: unknown): boolean {
+  if (value === null) return true;
+  if (STRING_OR_NUMBER_FIELDS.has(field)) return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
+  if (NUMBER_FIELDS.has(field)) return typeof value === 'number' && Number.isFinite(value);
+  if (BOOLEAN_FIELDS.has(field)) return typeof value === 'boolean';
+  return typeof value === 'string';
+}
+
+/**
+ * The fields of `record` that are listed, in that order, leaving out absent
+ * ones. A field of another type than documented (an amount as text, a flag
+ * as text, a state as a number, an object anywhere) refuses the answer.
+ */
 function pick(record: Json, fields: readonly string[]): Json {
   const out: Json = {};
   for (const field of fields) {
     if (!Object.hasOwn(record, field) || record[field] === undefined) continue;
     const value = record[field];
-    // Billy's record fields are strings, numbers, booleans or null (an id, an amount, a date, a state, a name).
-    // An object or a list where one of those should be refuses the answer; embedded lists are read with asArray.
-    if (value !== null && typeof value === 'object') throw new UnexpectedAnswerError();
+    if (!hasFieldType(field, value)) throw new UnexpectedAnswerError();
     out[field] = value;
   }
   return out;
+}
+
+/** The `lines` of a record, shaped, when the answer has them (see embedded). */
+function lines(value: unknown, fields: readonly string[]): { lines?: Json[] } {
+  const records = embedded(value);
+  return records ? { lines: records.map(line => pick(line, fields)) } : {};
 }
 
 /** An answer from Billy that is not shaped as the documentation says: our own text, nothing of the answer. */
@@ -245,8 +319,8 @@ export async function listContacts(
  */
 export async function getContact(client: UpstreamClient, input: { contactId: string }): Promise<Json> {
   const contact = single(await get(client, idPath('contacts', input.contactId, 'contactId'), { include: 'contact.contactPersons:embed' }), 'contact', input.contactId);
-  const persons = asArray(contact.contactPersons).map(person => pick(person, CONTACT_PERSON_FIELDS));
-  return { ...pick(contact, CONTACT_FIELDS), ...(Array.isArray(contact.contactPersons) ? { contactPersons: persons } : {}) };
+  const persons = embedded(contact.contactPersons)?.map(person => pick(person, CONTACT_PERSON_FIELDS));
+  return { ...pick(contact, CONTACT_FIELDS), ...(persons ? { contactPersons: persons } : {}) };
 }
 
 export interface ContactInput {
@@ -315,8 +389,8 @@ const PRODUCT_FIELDS = [
 ] as const;
 
 function shapeProduct(product: Json): Json {
-  const prices = asArray(product.prices).map(price => pick(price, ['currencyId', 'unitPrice']));
-  return { ...pick(product, PRODUCT_FIELDS), ...(Array.isArray(product.prices) ? { prices } : {}) };
+  const prices = embedded(product.prices)?.map(price => pick(price, ['currencyId', 'unitPrice']));
+  return { ...pick(product, PRODUCT_FIELDS), ...(prices ? { prices } : {}) };
 }
 
 export async function listProducts(
@@ -424,7 +498,7 @@ const INVOICE_LINE_FIELDS = [
 function shapeInvoice(invoice: Json): Json {
   return {
     ...pick(invoice, INVOICE_FIELDS),
-    ...(Array.isArray(invoice.lines) ? { lines: asArray(invoice.lines).map(line => pick(line, INVOICE_LINE_FIELDS)) } : {}),
+    ...lines(invoice.lines, INVOICE_LINE_FIELDS),
   };
 }
 
@@ -515,7 +589,7 @@ export async function getBill(client: UpstreamClient, input: { billId: string })
   const bill = single(await get(client, idPath('bills', input.billId, 'billId'), { include: 'bill.lines:embed' }), 'bill', input.billId);
   return {
     ...pick(bill, BILL_FIELDS),
-    ...(Array.isArray(bill.lines) ? { lines: asArray(bill.lines).map(line => pick(line, BILL_LINE_FIELDS)) } : {}),
+    ...lines(bill.lines, BILL_LINE_FIELDS),
   };
 }
 
@@ -751,7 +825,7 @@ const DAYBOOK_LINE_FIELDS = ['id', 'text', 'accountId', 'contraAccountId', 'taxR
 function shapeDaybookTransaction(transaction: Json): Json {
   return {
     ...pick(transaction, DAYBOOK_TRANSACTION_FIELDS),
-    ...(Array.isArray(transaction.lines) ? { lines: asArray(transaction.lines).map(line => pick(line, DAYBOOK_LINE_FIELDS)) } : {}),
+    ...lines(transaction.lines, DAYBOOK_LINE_FIELDS),
   };
 }
 

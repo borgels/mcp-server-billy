@@ -6,7 +6,7 @@ import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { API_KEY_HEADER, BillyClient } from '../src/billy/client.js';
 import { createBillyGateway, billyGatewayTools, billyToolCatalog, type GatewayJsonObject } from '../src/gateway.js';
-import { BILLY_TOOLS } from '../src/tools/billy.js';
+import { BILLY_TOOLS, pseudonym } from '../src/tools/billy.js';
 import { BASE, auditLines, connect, stubFetch, texts } from './helpers.js';
 
 const originalEnv = { ...process.env };
@@ -131,7 +131,7 @@ describe('per-instance redaction', () => {
     await b.callTool('get_contact', { contactId: 'i1' }, { requestId: 'b' });
 
     const errors = auditLines(process.env.BILLY_AUDIT_LOG).filter(line => line.action === 'error');
-    expect(errors.map(line => line.requestId)).toEqual(['a', 'b']);
+    expect(errors.map(line => line.requestId)).toEqual([pseudonym('a'), pseudonym('b')]);
     const log = JSON.stringify(errors);
     expect(log).not.toContain(KEY_A);
     expect(log).not.toContain(KEY_B);
