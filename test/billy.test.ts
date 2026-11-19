@@ -522,3 +522,41 @@ describe('after review', () => {
     expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl: 'https://api.billy.dk/v2', policy: {} })).not.toThrow();
   });
 });
+
+describe('after review 3', () => {
+  it('refuses a record with another id than asked for, an object where a value should be, and an invalid embedded entry', async () => {
+    const bad: Array<[string, GatewayJsonObject, Record<string, unknown>]> = [
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c2', name: 'X' } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', name: { nested: 'x' } } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', contactPersons: [{ id: 'p1' }, null] } } }],
+      ['get_contact', { contactId: 'c1' }, { 'GET /contacts/c1': { contact: { id: 'c1', contactPersons: 'nobody' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i2' } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', lines: [{ id: 'l1' }, 'bad'] } } }],
+      ['get_invoice', { invoiceId: 'i1' }, { 'GET /invoices/i1': { invoice: { id: 'i1', amount: { value: 1 } } } }],
+      ['update_contact', { contactId: 'c1', phone: '1' }, { 'PUT /contacts/c1': { contacts: [{ id: 'c9' }] } }],
+      ['list_invoices', {}, { 'GET /invoices': { invoices: [{ id: 'i1', state: ['approved'] }], meta: { paging: { page: 1 } } } }],
+    ];
+    for (const [tool, input, routes] of bad) {
+      const result = await call(billy(routes).gw, tool, input);
+      expect(result.isError, `${tool} ${JSON.stringify(routes)}`).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/nested|nobody/);
+    }
+  });
+
+  it('keeps no name or address of the caller in the audit, and replaces a request id that is not an opaque token', async () => {
+    const records: Array<Record<string, unknown>> = [];
+    const gw = createBillyGateway({
+      accessToken: TOKEN,
+      baseUrl: BASE,
+      fetchImpl: (async () => Response.json({ contact: { id: 'c1' } })) as typeof fetch,
+      policy: { audit: record => void records.push({ ...record }), pseudonymKey: 'host-pseudonym-key-0001' },
+    });
+    await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'Jens Jensen, Aarhus' });
+    await gw.callTool('get_contact', { contactId: 'c1' }, { caller: 'jens.jensen@example.test', requestId: 'req-42' });
+    expect(JSON.stringify(records)).not.toMatch(/jens|Jensen|Aarhus/i);
+    expect(records[0]?.caller).toMatch(/^hmac:[0-9a-f]{16}$/);
+    expect(records[0]?.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(records.at(-1)?.requestId).toBe('req-42');
+    expect(() => createBillyGateway({ accessToken: TOKEN, baseUrl: BASE, policy: { pseudonymKey: 'short' } })).toThrow(/pseudonymKey/);
+  });
+});

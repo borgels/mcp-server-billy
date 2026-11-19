@@ -205,9 +205,11 @@ async function catalogFetch(input: string | URL | Request): Promise<Response> {
   // Every list and record root key the tools read, and one changed record for every write.
   const roots = ['organization', 'contact', 'product'];
   const lists = ['contacts', 'products', 'invoices', 'bills', 'accounts', 'postings', 'daybooks', 'daybookTransactions', 'taxRates', 'bankPayments'];
+  // A record asked for by id answers with that id; the company and lists with x1.
+  const asked = /\/(?:contacts|products)\/([^/]+)$/.exec(path)?.[1];
   return Response.json({
-    ...Object.fromEntries(roots.map(key => [key, { id: 'x1' }])),
-    ...Object.fromEntries(lists.map(key => [key, [{ id: 'x1' }]])),
+    ...Object.fromEntries(roots.map(key => [key, { id: asked && key !== 'organization' ? decodeURIComponent(asked) : 'x1' }])),
+    ...Object.fromEntries(lists.map(key => [key, [{ id: asked ? decodeURIComponent(asked) : 'x1' }]])),
   });
 }
 

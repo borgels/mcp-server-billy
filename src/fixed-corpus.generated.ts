@@ -554,6 +554,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "policy.disabledTools must be an array of tool names",
   "policy.disabledTools[",
   "policy.enableWrites must be a boolean",
+  "policy.pseudonymKey must be a string or bytes of at least 16.",
   "policy_denied",
   "postings",
   "prices",

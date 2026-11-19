@@ -53,10 +53,10 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 const upstream: typeof fetch = async (input, init) => {
   const url = String(input).split('?')[0] ?? '';
   const path = url.slice(BASE.length);
-  if (init?.method === 'POST') return json({ contacts: [{ id: 'new', name: { echo: KEY, [KEY]: FRAGMENT } }] }, 201);
+  if (init?.method === 'POST') return json({ contacts: [{ id: 'new', name: `echo ${KEY} ${FRAGMENT}` }] }, 201);
   switch (path) {
     case '/contacts/echo':
-      return json({ contact: { id: 'x', name: { name: KEY, fragment: FRAGMENT, [KEY]: 1, [`k ${FRAGMENT}`]: { deeper: [FRAGMENT, KEY] } } } });
+      return json({ contact: { id: 'echo', name: `${KEY} ${FRAGMENT}`, street: FRAGMENT, cityText: `k ${FRAGMENT}`, phone: KEY } });
     case '/contacts/error':
       return json({ message: `Rejected ${KEY}`, code: FRAGMENT, details: { [KEY]: FRAGMENT } }, 400);
     case '/contacts/unauthorised':

@@ -31,15 +31,25 @@ function asRecord(value: unknown): Json | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Json) : undefined;
 }
 
+/** The records of an embedded list (lines, contact persons, prices). An entry that is not a record refuses the answer. */
 function asArray(value: unknown): Json[] {
-  return Array.isArray(value) ? (value.map(asRecord).filter(Boolean) as Json[]) : [];
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new UnexpectedAnswerError();
+  const records = value.map(asRecord);
+  if (records.some(entry => entry === undefined)) throw new UnexpectedAnswerError();
+  return records as Json[];
 }
 
 /** The fields of `record` that are listed, in that order, leaving out absent ones. */
 function pick(record: Json, fields: readonly string[]): Json {
   const out: Json = {};
   for (const field of fields) {
-    if (Object.hasOwn(record, field) && record[field] !== undefined) out[field] = record[field];
+    if (!Object.hasOwn(record, field) || record[field] === undefined) continue;
+    const value = record[field];
+    // Billy's record fields are strings, numbers, booleans or null (an id, an amount, a date, a state, a name).
+    // An object or a list where one of those should be refuses the answer; embedded lists are read with asArray.
+    if (value !== null && typeof value === 'object') throw new UnexpectedAnswerError();
+    out[field] = value;
   }
   return out;
 }
@@ -57,10 +67,13 @@ function hasId(record: Json | undefined): record is Json {
   return record !== undefined && typeof record.id === 'string' && record.id !== '';
 }
 
-/** The record under a singular root key (`{ invoice: {...} }`), with an id. Anything else is refused. */
-function single(body: unknown, key: string): Json {
+/**
+ * The record under a singular root key (`{ invoice: {...} }`), with an id;
+ * with `expectedId`, the id that was asked for. Anything else is refused.
+ */
+function single(body: unknown, key: string, expectedId?: string): Json {
   const record = asRecord(asRecord(body)?.[key]);
-  if (!hasId(record)) throw new UnexpectedAnswerError();
+  if (!hasId(record) || (expectedId !== undefined && record.id !== expectedId)) throw new UnexpectedAnswerError();
   return record;
 }
 
@@ -82,9 +95,9 @@ function list(body: unknown, key: string): Json[] {
  * answer: the first one with a string id. An answer without one is refused,
  * so a write is never reported as done without the record it made.
  */
-function firstChanged(body: unknown, key: string): Json {
+function firstChanged(body: unknown, key: string, expectedId?: string): Json {
   const [changed] = list(body, key);
-  if (!changed) throw new UnexpectedAnswerError();
+  if (!changed || (expectedId !== undefined && changed.id !== expectedId)) throw new UnexpectedAnswerError();
   return changed;
 }
 
@@ -231,10 +244,7 @@ export async function listContacts(
  * customer portal address) is left out.
  */
 export async function getContact(client: UpstreamClient, input: { contactId: string }): Promise<Json> {
-  const contact = single(
-    await get(client, idPath('contacts', input.contactId, 'contactId'), { include: 'contact.contactPersons:embed' }),
-    'contact',
-  );
+  const contact = single(await get(client, idPath('contacts', input.contactId, 'contactId'), { include: 'contact.contactPersons:embed' }), 'contact', input.contactId);
   const persons = asArray(contact.contactPersons).map(person => pick(person, CONTACT_PERSON_FIELDS));
   return { ...pick(contact, CONTACT_FIELDS), ...(Array.isArray(contact.contactPersons) ? { contactPersons: persons } : {}) };
 }
@@ -287,7 +297,7 @@ export async function createContact(
 export async function updateContact(client: UpstreamClient, input: ContactInput & { contactId: string }): Promise<Json> {
   const contact = pick(input as unknown as Json, CONTACT_WRITABLE);
   const body = nestedFailuresAsStatus(await client.put(idPath('contacts', input.contactId, 'contactId'), { contact }));
-  return pick(firstChanged(body, 'contacts'), CONTACT_FIELDS);
+  return pick(firstChanged(body, 'contacts', input.contactId), CONTACT_FIELDS);
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +340,7 @@ export async function listProducts(
 
 export async function getProduct(client: UpstreamClient, input: { productId: string }): Promise<Json> {
   return shapeProduct(
-    single(await get(client, idPath('products', input.productId, 'productId'), { include: 'product.prices:embed' }), 'product'),
+    single(await get(client, idPath('products', input.productId, 'productId'), { include: 'product.prices:embed' }), 'product', input.productId),
   );
 }
 
@@ -360,7 +370,7 @@ export async function updateProduct(client: UpstreamClient, input: ProductInput 
   const body = nestedFailuresAsStatus(
     await client.put(idPath('products', input.productId, 'productId'), { product: productBody(input) }),
   );
-  return shapeProduct(firstChanged(body, 'products'));
+  return shapeProduct(firstChanged(body, 'products', input.productId));
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +467,7 @@ export async function listInvoices(client: UpstreamClient, input: Json): Promise
 
 export async function getInvoice(client: UpstreamClient, input: { invoiceId: string }): Promise<Json> {
   return shapeInvoice(
-    single(await get(client, idPath('invoices', input.invoiceId, 'invoiceId'), { include: 'invoice.lines:embed' }), 'invoice'),
+    single(await get(client, idPath('invoices', input.invoiceId, 'invoiceId'), { include: 'invoice.lines:embed' }), 'invoice', input.invoiceId),
   );
 }
 
@@ -502,7 +512,7 @@ export async function listBills(client: UpstreamClient, input: Json): Promise<Js
 }
 
 export async function getBill(client: UpstreamClient, input: { billId: string }): Promise<Json> {
-  const bill = single(await get(client, idPath('bills', input.billId, 'billId'), { include: 'bill.lines:embed' }), 'bill');
+  const bill = single(await get(client, idPath('bills', input.billId, 'billId'), { include: 'bill.lines:embed' }), 'bill', input.billId);
   return {
     ...pick(bill, BILL_FIELDS),
     ...(Array.isArray(bill.lines) ? { lines: asArray(bill.lines).map(line => pick(line, BILL_LINE_FIELDS)) } : {}),
@@ -546,12 +556,12 @@ export async function createDraftInvoice(client: UpstreamClient, input: InvoiceD
  */
 export async function approveInvoice(client: UpstreamClient, input: { invoiceId: string }): Promise<Json> {
   const path = idPath('invoices', input.invoiceId, 'invoiceId');
-  const current = single(await get(client, path), 'invoice');
+  const current = single(await get(client, path), 'invoice', input.invoiceId);
   if (current.state !== 'draft') {
     throw new Error('Refused: only a draft invoice can be approved, and this invoice is not a draft. Nothing was sent.');
   }
   const body = nestedFailuresAsStatus(await client.put(path, { invoice: { state: 'approved' } }));
-  return shapeInvoice(firstChanged(body, 'invoices'));
+  return shapeInvoice(firstChanged(body, 'invoices', input.invoiceId));
 }
 
 // ---------------------------------------------------------------------------
@@ -587,8 +597,8 @@ export async function registerPayment(client: UpstreamClient, input: PaymentInpu
   // against the same balance.
   return serialised(`${organizationId}:${kind}:${subjectId}`, async () => {
     const subject = isInvoice
-      ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice')
-      : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill');
+      ? single(await get(client, idPath('invoices', subjectId, 'invoiceId')), 'invoice', subjectId)
+      : single(await get(client, idPath('bills', subjectId, 'billId')), 'bill', subjectId);
     // The lock holds only if the document is the company's (organizationId, the documented belongs-to of each).
     if (subject.organizationId !== organizationId) {
       throw new Error(`Refused: the ${kind} does not show that it belongs to this company. Nothing was sent.`);
@@ -610,7 +620,7 @@ export async function registerPayment(client: UpstreamClient, input: PaymentInpu
     if (input.amount > subject.balance + 0.005) {
       throw new Error(`Refused: the amount is more than the ${kind}'s outstanding balance. Nothing was sent.`);
     }
-    const account = single(await get(client, idPath('accounts', input.cashAccountId, 'cashAccountId')), 'account');
+    const account = single(await get(client, idPath('accounts', input.cashAccountId, 'cashAccountId')), 'account', input.cashAccountId);
     if (account.isPaymentEnabled !== true) {
       throw new Error('Refused: the account is not set up for payments in Billy (isPaymentEnabled). Nothing was sent.');
     }

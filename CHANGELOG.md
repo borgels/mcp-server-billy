@@ -37,5 +37,9 @@ documentation (https://www.billy.dk/api, API v2).
   must have type `bill` and credit no other bill; records must have an id and
   a list with an invalid entry is refused whole; `create_contact` requires
   `paymentTermsDays`.
+- After the third review: a record must have the id asked for; an object
+  where a value should be, or an embedded entry that is not a record,
+  refuses the answer; the audit keeps the caller only as a pseudonym
+  (`policy.pseudonymKey`) and a request id only when it is an opaque token.
 - Not yet run against a live Billy company: the tests use answers shaped as
   the documentation shows them.
