@@ -1,40 +1,65 @@
-# mcp-server-example
+# mcp-server-billy
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for the Example API. It lets an MCP client (Claude or any other MCP-capable assistant) read data from the Example API and, when enabled, write to it.
+A [Model Context Protocol](https://modelcontextprotocol.io) server for [Billy](https://www.billy.dk), the Danish online accounting system (now part of Shine). It lets an MCP client (Claude or any other MCP-capable assistant) read a company's contacts, products, invoices, bills, chart of accounts, postings and daybooks, and, when enabled, create drafts, approve a draft invoice and register payments in the books.
 
-> This is an independent, unofficial project. It is not developed, endorsed or supported by &lt;Vendor&gt;.
+> This is an independent, unofficial project. It is not developed, endorsed or supported by Billy or Shine.
 
 - Read-only by default; writes are opt-in per instance.
-- One set of upstream credentials per server instance; the server does no per-user authorization itself (see [Security model](#security-model)).
+- One Billy company per server instance: a Billy access token is tied to one company.
+- No tool deletes anything, sends an invoice (e-mail or e-invoice), moves money, or changes the chart of accounts, VAT rates, the company's details or bank details. The client sends only a fixed list of writes and has no DELETE.
 - Two transports: stdio for local clients, stateless streamable HTTP for containers and gateways.
 - Embeddable: the `./gateway` export exposes the same tools, validation, policy and audit to a host application.
 
-<!-- template:start -->
-## Using this template
-
-This repository is a GitHub template for TypeScript MCP servers: a minimal working server for a fictional upstream API (one read tool, one write tool) with hardened transports, client, policy, audit, tests and release workflows. After creating a repository from it, run `node scripts/rename.mjs <name> [PREFIX]` and follow [docs/NEW-SERVER.md](docs/NEW-SERVER.md). The rename removes this section; the checklist stays. Nothing is published from the template repository, or from a generated repository before the rename.
-<!-- template:end -->
+Built against Billy's public API documentation (<https://www.billy.dk/api>, API v2). The tests use answers shaped as that documentation shows them; they have not been run against a live Billy company.
 
 ## Tools
 
+Reads (on by default):
+
 | Tool | Purpose |
 |---|---|
-| `example_get_item` | Fetch one item by id. |
-| `example_create_item` *(write)* | Create an item. |
+| `billy_check_connection` | Check the token; returns the company id and name. |
+| `billy_get_organization` | The company's details: name, address, CVR number, base currency, fiscal year, VAT period. Subscription, card and bank fields are left out. |
+| `billy_list_contacts` | Customers and suppliers, filtered by kind and text. |
+| `billy_get_contact` | One contact with its contact persons. The customer portal access code is left out. |
+| `billy_list_products` / `billy_get_product` | Products with prices per currency. |
+| `billy_list_invoices` / `billy_get_invoice` | Invoices and credit notes, with Billy's documented filters; one with its lines. |
+| `billy_list_bills` / `billy_get_bill` | Bills from suppliers; one with its lines. |
+| `billy_list_accounts` | The chart of accounts. Bank account numbers and IBANs only as their last four characters. |
+| `billy_list_postings` | Postings, by account, transaction, dates and text. |
+| `billy_list_daybooks` / `billy_list_daybook_transactions` | Daybooks (kassekladder) and their transactions with lines. |
+| `billy_list_tax_rates` | VAT rates. |
+
+Writes (off unless `BILLY_ENABLE_WRITES=true`, or `enableWrites` in a host's policy):
+
+| Tool | What it does |
+|---|---|
+| `billy_create_contact` / `billy_update_contact` | Create a customer or supplier (with contact persons), or change the fields given. Contacts in Billy have no bank details. |
+| `billy_create_product` / `billy_update_product` | Create a product, or change the fields given; prices, when given, replace the product's prices. |
+| `billy_create_draft_invoice` | Create an invoice as a draft. It is not approved, e-mailed or sent. |
+| `billy_approve_invoice` | Approve (book) a draft invoice. Refuses anything but a draft. Billy then numbers it; it cannot return to draft, only be credited. Not e-mailed or sent. |
+| `billy_register_payment` | Register that an approved invoice or bill was paid, on a payment account. Moves no money. Refuses an amount above what is owed, a paid or unapproved invoice or bill, an account that is not a payment account, or another currency. Marked `requiresConfirmation` for hosts. |
+| `billy_create_daybook_transaction` | Put a transaction with lines in a daybook as a draft. A person approves it in Billy. |
+
+Lists without documented filters in Billy (contacts, products, accounts, daybooks, VAT rates) are read to the end, at most 5,000 records, and filtered by the server; `complete` is false when there were more. Billy ignores unknown query parameters rather than refusing them, so the server sends only the filters Billy documents.
+
+## Getting an access token
+
+In Billy, go to **Settings -> Access tokens**, click **Create access token**, give it a name and save. Billy's documentation: "The tokens you create under Settings -> Access tokens are tied to that company only. If you have multiple companies, you'll need a separate token for each one. Tokens are permanent." Delete the token in the same place to revoke access.
 
 ## Quick start
 
-Requires Node.js 22 or later and an API key for the Example API.
+Requires Node.js 22 or later and a Billy access token.
 
 ```bash
-npx <npm-package>
+npx mcp-server-billy
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/borgels/mcp-server-example.git
-cd mcp-server-example
+git clone https://github.com/borgels/mcp-server-billy.git
+cd mcp-server-billy
 npm ci
 npm run build
 ```
@@ -42,9 +67,7 @@ npm run build
 Claude Code:
 
 ```bash
-claude mcp add example \
-  --env EXAMPLE_API_KEY=<key> --env EXAMPLE_BASE_URL=<base url> \
-  -- npx -y <npm-package>
+claude mcp add billy --env BILLY_ACCESS_TOKEN=<token> -- npx -y mcp-server-billy
 ```
 
 Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio servers:
@@ -52,12 +75,11 @@ Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio
 ```json
 {
   "mcpServers": {
-    "example": {
+    "billy": {
       "command": "npx",
-      "args": ["-y", "<npm-package>"],
+      "args": ["-y", "mcp-server-billy"],
       "env": {
-        "EXAMPLE_API_KEY": "<key>",
-        "EXAMPLE_BASE_URL": "<base url>"
+        "BILLY_ACCESS_TOKEN": "<token>"
       }
     }
   }
@@ -66,21 +88,20 @@ Claude Desktop (`claude_desktop_config.json`), or any client that launches stdio
 
 ### Docker and HTTP
 
-Images are published to `ghcr.io/borgels/mcp-server-example`: `latest` and the commit SHA from `main`, and `vX.Y.Z` for release tags. The container serves streamable HTTP at `/mcp` on port 3000, plus an unauthenticated `GET /healthz`.
+Images are published to `ghcr.io/borgels/mcp-server-billy`: `latest` and the commit SHA from `main`, and `vX.Y.Z` for release tags. The container serves streamable HTTP at `/mcp` on port 3000, plus an unauthenticated `GET /healthz`.
 
 ```bash
 TOKEN=$(openssl rand -hex 32); echo "$TOKEN"
-docker run -d --name example-mcp -p 127.0.0.1:3000:3000 \
-  -e EXAMPLE_API_KEY=<key> \
-  -e EXAMPLE_BASE_URL=<base url> \
+docker run -d --name billy-mcp -p 127.0.0.1:3000:3000 \
+  -e BILLY_ACCESS_TOKEN=<token> \
   -e MCP_HTTP_TOKEN="$TOKEN" \
-  ghcr.io/borgels/mcp-server-example:latest
+  ghcr.io/borgels/mcp-server-billy:latest
 
-claude mcp add --transport http example http://127.0.0.1:3000/mcp \
+claude mcp add --transport http billy http://127.0.0.1:3000/mcp \
   --header "Authorization: Bearer $TOKEN"
 ```
 
-To keep an audit log in the container, mount a writable directory and point `EXAMPLE_AUDIT_LOG` into it (e.g. `-v example-audit:/audit -e EXAMPLE_AUDIT_LOG=/audit/audit.jsonl`); the image runs as the `node` user and `/app` is not writable.
+To keep an audit log in the container, mount a writable directory and point `BILLY_AUDIT_LOG` into it (e.g. `-v billy-audit:/audit -e BILLY_AUDIT_LOG=/audit/audit.jsonl`); the image runs as the `node` user and `/app` is not writable.
 
 Clients send `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server will not start on a non-loopback address without a token of at least 32 characters. It does not terminate TLS; run it behind a reverse proxy or gateway that does.
 
@@ -88,24 +109,24 @@ Clients send `Authorization: Bearer <MCP_HTTP_TOKEN>`. The server will not start
 
 Configuration is read from the environment (see `.env.example`). Invalid numbers, booleans, URLs and unknown tool names stop the server at startup. Booleans accept `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off`.
 
-### Upstream API
+### Billy API
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXAMPLE_API_KEY` | – | **Required.** API key. |
-| `EXAMPLE_BASE_URL` | – | **Required.** Base URL of the API. Must be `https` (loopback `http` is allowed for local mocks). |
-| `EXAMPLE_ALLOW_CUSTOM_BASE_URL` | `false` | Allow a base URL outside the hosts the server expects, when such a list is configured. |
-| `EXAMPLE_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
-| `EXAMPLE_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
-| `EXAMPLE_MAX_RESPONSE_BYTES` | `10485760` | Largest response body read (at most 100 MB). |
+| `BILLY_ACCESS_TOKEN` | – | **Required.** Access token of one Billy company, sent as `X-Access-Token`. |
+| `BILLY_BASE_URL` | `https://api.billysbilling.com/v2` | Base URL of the API. Only `api.billysbilling.com` and `api.billy.dk` (the hosts in Billy's documentation) are accepted, over `https` (loopback `http` is allowed for local mocks). |
+| `BILLY_ALLOW_CUSTOM_BASE_URL` | `false` | Allow another host. |
+| `BILLY_TIMEOUT_MS` | `30000` | Timeout per request attempt. |
+| `BILLY_MAX_CONCURRENCY` | `4` | Maximum concurrent upstream requests. |
+| `BILLY_MAX_RESPONSE_BYTES` | `10485760` | Largest response body read (at most 100 MB). |
 
 ### Access control
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXAMPLE_ENABLE_WRITES` | `false` | Enable the write tools. |
-| `EXAMPLE_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `example_` prefix. |
-| `EXAMPLE_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text hashed, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
+| `BILLY_ENABLE_WRITES` | `false` | Enable the write tools. |
+| `BILLY_DISABLED_TOOLS` | – | Comma-separated tool names to disable, with or without the `billy_` prefix. |
+| `BILLY_AUDIT_LOG` | – | Path of a JSONL audit log: one record per tool call start, finish and error, with ids in clear text, free text (names, numbers, descriptions, searches) hashed, lists counted, duration, status and the caller passed by an embedding host. Write tools refuse to run if the log cannot be written. |
 
 ### HTTP transport
 
@@ -123,24 +144,28 @@ Configuration is read from the environment (see `.env.example`). Invalid numbers
 
 ## Embedding (`./gateway`)
 
-A host application can run the tools in-process instead of over MCP:
+A host application can run the tools in-process instead of over MCP, one instance per Billy company:
 
 ```ts
-import { createExampleGateway, exampleToolCatalog } from '<npm-package>/gateway';
+import { createBillyGateway, billyToolCatalog, resolveBillyChange } from 'mcp-server-billy/gateway';
 
-const gateway = createExampleGateway({ apiKey: tenant.apiKey, baseUrl: tenant.baseUrl });
-const result = await gateway.callTool('get_item', { itemId: 'i1' }, { caller: 'user@example.test' });
+const gateway = createBillyGateway({
+  accessToken: company.billyToken,
+  policy: { enableWrites: true, disabledTools: [], audit: record => log(record) },
+});
+const result = await gateway.callTool('list_invoices', { isPaid: false }, { caller: 'person-1' });
 ```
 
-- **Explicit credentials.** `apiKey` and `baseUrl` are required; a missing value throws when the gateway is created. A gateway never reads `EXAMPLE_API_KEY` or `EXAMPLE_BASE_URL` from the environment, so one tenant cannot silently fall back to the process's credentials. The stdio and HTTP transports still read them from the environment.
-- **Several tenants in one process.** Create one gateway per set of credentials. Each instance redacts error text, tool results and audit records with its own key only; no secret is kept in a process-wide registry, and a dropped instance releases its key.
-- **Instance policy from the host.** Pass `policy` to `createExampleGateway`: `enableWrites` (default false), `disabledTools` (must name known tools) and `audit`, a function that receives each audit record instead of `EXAMPLE_AUDIT_LOG` (without it the instance writes no audit; a write tool does not run if the sink throws on its start record). An instance with `policy` reads none of `EXAMPLE_ENABLE_WRITES`, `EXAMPLE_DISABLED_TOOLS`, `EXAMPLE_AUDIT_LOG` or `EXAMPLE_ALLOW_CUSTOM_BASE_URL`, so tenants in one process can have different settings. Without `policy` the instance uses the environment, like the MCP server. Each call runs in a scope of its own, so a call made from inside another instance's call never inherits its policy, sink or redactor, and every audit record is redacted as a whole with the instance's own key before the sink sees it. The limits (`EXAMPLE_TIMEOUT_MS`, ...) are still read from the environment and apply to every gateway in the process. Per-user and per-tenant authorization is the host's job.
-- **Result format.** A successful `callTool` result has `structuredContent` and one text block: a short summary, a blank line, and the same data as compact JSON, as the MCP specification recommends (many clients read only the text). The JSON is built from the redacted result, so it holds exactly `structuredContent`. An error result has only its text.
-- **Tool catalog.** `exampleToolCatalog` is a frozen list of every tool: `name` (without the `example_` prefix), `title`, `description`, `riskLevel` (`read`, `write` or `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema), `broad` (true when a tool can read more than its name says, so a host gives it only to roles that may read everything) and `upstream`, the API requests the tool may make (`access`, `method` and path template). It is generated from the same tool table as the MCP server, so it cannot drift from the registered tools. `exampleGatewayTools` holds the same definitions without `upstream` and `broad`; `gateway.tools` lists those enabled on the instance.
+- **Explicit credentials.** `accessToken` is required; a missing value throws when the gateway is created. `baseUrl` is optional (Billy's documented endpoint by default). A gateway never reads `BILLY_ACCESS_TOKEN` or `BILLY_BASE_URL` from the environment. The stdio and HTTP transports still read them from the environment.
+- **Several companies in one process.** Create one gateway per token. Each instance redacts error text, tool results and audit records with its own token only; no secret is kept in a process-wide registry, and a dropped instance releases its token.
+- **Instance policy from the host.** Pass `policy` to `createBillyGateway`: `enableWrites` (default false), `disabledTools` (must name known tools) and `audit`, a function that receives each audit record instead of `BILLY_AUDIT_LOG` (without it the instance writes no audit; a write tool does not run if the sink throws on its start record). An instance with `policy` reads none of `BILLY_ENABLE_WRITES`, `BILLY_DISABLED_TOOLS`, `BILLY_AUDIT_LOG` or `BILLY_ALLOW_CUSTOM_BASE_URL`. Each call runs in a scope of its own. The limits (`BILLY_TIMEOUT_MS`, ...) are still read from the environment and apply to every gateway in the process. Per-user authorization is the host's job.
+- **Result format.** A successful `callTool` result has `structuredContent` and one text block: a short summary, a blank line, and the same data as compact JSON. An error result has only its text.
+- **Tool catalog.** `billyToolCatalog` is a frozen list of every tool: `name` (without the `billy_` prefix), `title`, `description`, `riskLevel` (`read` or `write`; no tool is `destructive`), `enabledByDefault`, `inputSchema` (JSON Schema), `broad` (false for every tool), `upstream` (the API requests the tool may make), `requiresConfirmation` (true for `register_payment` only: a host should have a person confirm it outside the chat) and, for write tools, `change`: the action (`create`, `update`, `approve`, `register_payment`), the record kind and `logFields`.
+- **Change resolution.** `resolveBillyChange(tool, input, { pseudonymKey })` returns what a write call will change before it is sent, for a host that logs the change first: Billy record ids, amounts, currency codes, dates, flags and the number of lines in clear; a number the company chose (contact, product or voucher number) only as a pseudonym (HMAC-SHA-256 with the host's key, else SHA-256); never a name, an address or a text.
 
 ## Threat model
 
-What this server guarantees about the API key, and what it does not. It is
+What this server guarantees about the access token, and what it does not. It is
 the yardstick for every change that touches errors, results or audit.
 
 **Scope.** Guarantees (a), (b) and (c) apply to the embeddable gateway
@@ -196,12 +221,12 @@ on as the API returned them.
 
 ## Security model
 
-- **One shared identity.** Every caller acts with the rights of the configured API key. Give it the least rights that work and rotate it regularly.
+- **One shared identity.** Every caller acts with the rights of the configured access token. Give it the least rights that work and rotate it regularly.
 - **Per-user authorization belongs in front of the server.** The server checks a single bearer token and does not know the end user. For multi-user use, run it behind an identity-aware gateway that decides which users may call which tools, holds the bearer token, and is the only network path to the server. Hosts can also embed the tools through the `./gateway` module export and pass the caller identity into the audit log.
-- **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the API key can see. To separate data, run several instances with different keys.
-- **Writes are off by default.** Write tools are annotated as destructive so clients can ask for confirmation. Read-only tools get a client that refuses non-GET requests. When `EXAMPLE_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
+- **Tool access is not data access.** A gateway controls who may call which tool; every permitted caller still sees everything the access token can see. To separate data, run several instances with different keys.
+- **Writes are off by default.** Write tools are not annotated destructive (none deletes anything), but they change the company's books; a client should ask before running them, and `register_payment` is marked for a person's confirmation. Read-only tools get a client that refuses non-GET requests. When `BILLY_AUDIT_LOG` is set, a write tool does not run unless its start record is written; without it there is no audit record.
 - **Upstream content is untrusted input.** Data returned by the API may be written by anyone with access to it. Tool results label it as data; clients that combine this server with other tools should treat it accordingly.
-- **The API key stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
+- **The access token stays on the API origin.** Redirects are never followed, the base URL must use `https`, and error messages and audit records are redacted (by each instance, with that instance's key) and size-capped. See the threat model above for what is and is not guaranteed.
 - **The HTTP transport fails closed.** It refuses to start on a non-loopback address or with any origin allowed unless a token is set, compares tokens in constant time, throttles failed authentication per client address, checks `Origin` and `Host` (DNS rebinding), and caps request bodies.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
@@ -220,8 +245,8 @@ Project layout:
 
 | Path | Contents |
 |---|---|
-| `src/tools/example.ts` | Shared tool table (MCP and gateway), policy and audit wrapper. |
-| `src/example/` | Upstream client, API calls, policy, audit, tool annotations. |
+| `src/tools/billy.ts` | Shared tool table (MCP and gateway), policy and audit wrapper. |
+| `src/billy/` | Upstream client, API calls, policy, audit, tool annotations. |
 | `src/transports/` | stdio and HTTP entry points; HTTP auth, origin and host checks. |
 | `src/gateway.ts` | Embeddable entry point (`./gateway` export). |
 | `src/config-env.ts` | Validated environment readers. |
@@ -232,7 +257,7 @@ Project layout:
 2. Tag the merged commit and push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. `release.yml` tests, packs and publishes the tarball to npm through trusted publishing (no stored token; npm adds provenance when the repository is public), then publishes `server.json` to the MCP Registry. Versions already on npm or in the registry are skipped, so a failed run can be re-run. Pre-release tags (`vX.Y.Z-rc.1`) go to the npm dist-tag `next` and not to the registry. `publish.yml` pushes the `vX.Y.Z` image.
 
-The first version of a new package is published by hand; see the header of `.github/workflows/release.yml` (and [docs/NEW-SERVER.md](docs/NEW-SERVER.md)).
+The first version of a new package is published by hand; see the header of `.github/workflows/release.yml`.
 
 ## License
 
