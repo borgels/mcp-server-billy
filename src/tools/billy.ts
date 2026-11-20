@@ -2,6 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createHmac, createHash } from 'node:crypto';
 import { z } from 'zod/v4';
 import {
+  DELETE_DRAFT_ANNOTATIONS,
   READ_TOOL_ANNOTATIONS,
   UNTRUSTED_CONTENT_NOTE,
   UNTRUSTED_RESULT_NOTE,
@@ -13,13 +14,18 @@ import { formatUnknownError, redactDeep, type SecretRedactor } from '../errors.j
 import { withheldResult } from '../fallbacks.js';
 import { leaksSecret } from '../key-admission.js';
 import {
+  approveBill,
   approveInvoice,
+  attachBillFile,
   BILL_FILTERS,
   checkConnection,
   createContact,
   createDaybookTransaction,
+  createDraftBill,
   createDraftInvoice,
   createProduct,
+  deleteDraftBill,
+  deleteDraftInvoice,
   getBill,
   getContact,
   getInvoice,
@@ -34,9 +40,11 @@ import {
   listPostings,
   listProducts,
   listTaxRates,
+  MAX_FILE_BYTES,
   MAX_PAGE_SIZE,
   MAX_SCAN_RECORDS,
   registerPayment,
+  sendInvoiceEmail,
   updateContact,
   updateProduct,
 } from '../billy/resources.js';
@@ -52,7 +60,7 @@ import {
   RECORD_ID_PATTERN,
 } from '../billy/values.js';
 
-type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATIONS;
+type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATIONS | typeof DELETE_DRAFT_ANNOTATIONS;
 
 /**
  * One upstream request a tool may make: `read` or `write`, the HTTP method
@@ -62,7 +70,7 @@ type ToolAnnotations = typeof READ_TOOL_ANNOTATIONS | typeof WRITE_TOOL_ANNOTATI
  */
 export interface UpstreamOperation {
   access: 'read' | 'write';
-  method: 'GET' | 'POST' | 'PUT';
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   path: string;
 }
 
@@ -72,10 +80,10 @@ export interface RedactingClient extends UpstreamClient {
 }
 
 /** What a write tool does. */
-export type BillyChangeAction = 'create' | 'update' | 'approve' | 'register_payment';
+export type BillyChangeAction = 'create' | 'update' | 'approve' | 'register_payment' | 'send' | 'attach' | 'delete';
 
 /** The kind of record a write tool touches. */
-export type BillyChangeRecord = 'contact' | 'product' | 'invoice' | 'payment' | 'daybook_transaction';
+export type BillyChangeRecord = 'contact' | 'product' | 'invoice' | 'bill' | 'payment' | 'daybook_transaction';
 
 /**
  * The type a logged value must have; anything else is left out of the values.
@@ -125,6 +133,13 @@ export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   /** Strict object built from inputShape: unknown arguments are rejected. */
   inputSchema: z.ZodObject;
   annotations: ToolAnnotations;
+  /**
+   * The gateway risk level when it is not the one the annotations give. Only
+   * 'write', for deleting a draft that was never approved or sent: it had no
+   * effect outside Billy, so it is an ordinary change, while the MCP
+   * annotations still say a record is removed.
+   */
+  riskLevel?: 'write';
   /** Whether the result carries upstream content (vs. server metadata). */
   returnsUpstreamContent: boolean;
   /** Short human-readable summary used by the gateway result text. */
@@ -236,6 +251,8 @@ function atLeastOneChange(fields: readonly string[]) {
 }
 
 const WRITE_NOTE = 'Off unless writes are enabled (BILLY_ENABLE_WRITES, or the gateway host policy enableWrites).';
+/** Longest base64 text of a file of MAX_FILE_BYTES. */
+const MAX_BASE64_LENGTH = Math.ceil(MAX_FILE_BYTES / 3) * 4;
 const LIST_NOTE = `Reads every page (at most ${MAX_SCAN_RECORDS} records) and filters here; complete is false when there were more.`;
 
 export const BILLY_TOOLS: ToolDefinition[] = [
@@ -459,8 +476,9 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   }),
 
   // -------------------------------------------------------------------------
-  // Writes. No tool deletes, sends an e-mail or an e-invoice, changes the chart of accounts, VAT rates, the
-  // company's details or any bank details, or moves money.
+  // Writes. No tool deletes anything approved, booked or sent, sends an e-invoice, changes the chart of accounts,
+  // VAT rates, the company's details, users or any bank details, or moves money. Deleting is only of a draft
+  // invoice or bill that was never approved or sent; sending is only of an approved invoice, by e-mail.
 
   defineTool({
     name: 'billy_create_contact',
@@ -589,6 +607,141 @@ export const BILLY_TOOLS: ToolDefinition[] = [
     ],
     change: change('approve', 'invoice', { invoiceId: 'recordId' }),
     handler: async (client, input) => approveInvoice(client, input),
+  }),
+  defineTool({
+    name: 'billy_send_invoice',
+    title: 'E-mail approved invoice (Billy)',
+    description: `E-mail an approved invoice to one contact person of its customer, through Billy (as "send" in Billy). Reads the invoice and the contact person first, and refuses unless the invoice is approved and the contact person belongs to the invoice's customer and has an e-mail address. Billy sends to one contact person per call. It is not sent as an e-invoice. ${WRITE_NOTE}`,
+    inputShape: {
+      invoiceId: recordId('The approved invoice, from list_invoices.'),
+      contactPersonId: recordId("A contact person of the invoice's customer, from get_contact."),
+      emailSubject: text(255).describe('Subject of the e-mail.'),
+      emailBody: text(5000).describe('Text of the e-mail.'),
+    },
+    annotations: WRITE_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: false,
+    summary: 'Sent the invoice by e-mail.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/invoices/{invoiceId}' },
+      { access: 'read', method: 'GET', path: '/contactPersons/{contactPersonId}' },
+      { access: 'write', method: 'POST', path: '/invoices/{invoiceId}/emails' },
+    ],
+    change: change('send', 'invoice', { invoiceId: 'recordId', contactPersonId: 'recordId' }),
+    handler: async (client, input) => sendInvoiceEmail(client, input),
+  }),
+  defineTool({
+    name: 'billy_delete_draft_invoice',
+    title: 'Delete draft invoice (Billy)',
+    description: `Delete a draft invoice that was never approved or sent. Reads it first and refuses unless it is a draft with no approval and sent state unsent. An approved invoice can never be deleted here; it is credited in Billy. ${WRITE_NOTE}`,
+    inputShape: { invoiceId: recordId('The id of the draft invoice.') },
+    annotations: DELETE_DRAFT_ANNOTATIONS,
+    riskLevel: 'write',
+    returnsUpstreamContent: false,
+    summary: 'Deleted the draft invoice.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/invoices/{invoiceId}' },
+      { access: 'write', method: 'DELETE', path: '/invoices/{invoiceId}' },
+    ],
+    change: change('delete', 'invoice', { invoiceId: 'recordId' }),
+    handler: async (client, input) => deleteDraftInvoice(client, input),
+  }),
+  defineTool({
+    name: 'billy_create_draft_bill',
+    title: 'Create draft bill (Billy)',
+    description: `Create a bill from a supplier (a purchase voucher) as a draft, with lines on accounts. It is not approved (booked) and moves no money; a draft can still be changed or deleted. Attach the supplier's invoice or receipt with attach_bill_file. ${WRITE_NOTE}`,
+    inputShape: {
+      contactId: recordId('The supplier id, from list_contacts (kind supplier).'),
+      entryDate: dateSchema.describe("The bill's date, YYYY-MM-DD."),
+      dueDate: dateSchema.optional().describe('Due date, YYYY-MM-DD.'),
+      currencyId: currencySchema.describe('ISO 4217 currency code of the bill, e.g. DKK.'),
+      suppliersInvoiceNo: text(50).optional().describe("The supplier's invoice number."),
+      voucherNo: text(50).optional().describe('Voucher number.'),
+      taxMode: z.enum(['incl', 'excl']).optional().describe('Amounts include (incl) or exclude (excl) VAT. Default: the company setting.'),
+      lines: z
+        .array(
+          z.strictObject({
+            accountId: recordId('The expense account, from list_accounts.'),
+            taxRateId: recordId('The purchase VAT rate, from list_tax_rates.'),
+            description: text(255).describe('Line text.'),
+            amount: amountSchema,
+          }),
+        )
+        .min(1)
+        .max(100)
+        .describe('Bill lines, at least one.'),
+    },
+    annotations: WRITE_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Created draft bill.',
+    upstream: [{ access: 'write', method: 'POST', path: '/bills' }],
+    change: change('create', 'bill', {
+      contactId: 'recordId',
+      entryDate: 'date',
+      currencyId: 'currency',
+      voucherNo: 'pseudonym',
+      lines: 'count',
+    }),
+    handler: async (client, input) => createDraftBill(client, input),
+  }),
+  defineTool({
+    name: 'billy_attach_bill_file',
+    title: 'Attach file to bill (Billy)',
+    description: `Attach a file to a bill: the supplier's invoice or a receipt, as PDF, PNG or JPEG of at most ${MAX_FILE_BYTES / 1024 / 1024} MB, given as base64. The type is read from the file itself, and the name must end in .pdf, .png, .jpg or .jpeg to match. Refuses a voided bill. ${WRITE_NOTE}`,
+    inputShape: {
+      billId: recordId('The bill, from list_bills or create_draft_bill.'),
+      fileName: z
+        .string()
+        .trim()
+        .regex(/^[A-Za-z0-9 ._()-]{1,100}$/)
+        .regex(/\.(pdf|png|jpe?g)$/i)
+        .describe('File name of letters, digits, spaces and . _ ( ) -, ending in .pdf, .png, .jpg or .jpeg.'),
+      contentBase64: z
+        .string()
+        .max(MAX_BASE64_LENGTH)
+        .regex(/^[A-Za-z0-9+/]+={0,2}$/)
+        .describe('The file, base64-encoded.'),
+    },
+    annotations: WRITE_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Attached the file to the bill.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/bills/{billId}' },
+      { access: 'write', method: 'POST', path: '/files' },
+      { access: 'write', method: 'POST', path: '/attachments' },
+    ],
+    change: change('attach', 'bill', { billId: 'recordId' }),
+    handler: async (client, input) => attachBillFile(client, input),
+  }),
+  defineTool({
+    name: 'billy_approve_bill',
+    title: 'Approve draft bill (Billy)',
+    description: `Approve (book) a draft bill. Reads it first and refuses unless it is a draft. An approved bill cannot be returned to draft. It moves no money; a payment is registered with register_payment. ${WRITE_NOTE}`,
+    inputShape: { billId: recordId('The id of the draft bill.') },
+    annotations: WRITE_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Approved bill.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/bills/{billId}' },
+      { access: 'write', method: 'PUT', path: '/bills/{billId}' },
+    ],
+    change: change('approve', 'bill', { billId: 'recordId' }),
+    handler: async (client, input) => approveBill(client, input),
+  }),
+  defineTool({
+    name: 'billy_delete_draft_bill',
+    title: 'Delete draft bill (Billy)',
+    description: `Delete a draft bill that was never approved. Reads it first and refuses unless it is a draft with no approval. An approved bill can never be deleted here. ${WRITE_NOTE}`,
+    inputShape: { billId: recordId('The id of the draft bill.') },
+    annotations: DELETE_DRAFT_ANNOTATIONS,
+    riskLevel: 'write',
+    returnsUpstreamContent: false,
+    summary: 'Deleted the draft bill.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/bills/{billId}' },
+      { access: 'write', method: 'DELETE', path: '/bills/{billId}' },
+    ],
+    change: change('delete', 'bill', { billId: 'recordId' }),
+    handler: async (client, input) => deleteDraftBill(client, input),
   }),
   defineTool({
     name: 'billy_register_payment',

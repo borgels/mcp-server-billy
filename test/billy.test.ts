@@ -317,16 +317,21 @@ describe('writes', () => {
     expect(calls).toHaveLength(1);
   });
 
-  it('has no tool that deletes, sends, or changes accounts, VAT rates or the company', () => {
+  it('has no tool that changes accounts, VAT rates, the company or users, sends an e-invoice, or deletes beyond drafts', () => {
+    const deleting: string[] = [];
     for (const entry of billyToolCatalog) {
       expect(entry.riskLevel).not.toBe('destructive');
       for (const operation of entry.upstream) {
-        expect(['GET', 'POST', 'PUT']).toContain(operation.method);
+        expect(['GET', 'POST', 'PUT', 'DELETE']).toContain(operation.method);
         if (operation.access === 'write') {
-          expect(operation.path).toMatch(/^\/(contacts|products|invoices|bankPayments|daybookTransactions)(\/\{\w+\})?$/);
+          expect(operation.path).toMatch(
+            /^\/(contacts|products|invoices|bills|bankPayments|daybookTransactions|files|attachments)(\/\{\w+\})?$|^\/invoices\/\{invoiceId\}\/emails$/,
+          );
         }
+        if (operation.method === 'DELETE') deleting.push(entry.name);
       }
     }
+    expect(deleting).toEqual(['delete_draft_invoice', 'delete_draft_bill']);
   });
 });
 

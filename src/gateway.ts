@@ -51,9 +51,10 @@ import {
  * instance.
  *
  * What no policy can turn on: a request outside the client's fixed list of
- * writes (src/billy/client.ts, ALLOWED_WRITES). There is no DELETE, and no
- * tool that changes the chart of accounts, VAT rates, the company's details
- * or bank details, sends an invoice (e-mail or e-invoice) or moves money.
+ * writes (src/billy/client.ts, ALLOWED_WRITES). The only DELETEs are of a
+ * draft invoice or bill that was never approved or sent, and no tool
+ * changes the chart of accounts, VAT rates, the company's details, users or
+ * bank details, sends an e-invoice or moves money.
  */
 
 export type { AuditSink, InstancePolicy } from './billy/policy.js';
@@ -172,7 +173,7 @@ function toGatewayDefinition(tool: ToolDefinition): GatewayToolDefinition {
     name: stripPrefix(tool.name),
     title: tool.title,
     description: tool.description,
-    riskLevel: tool.annotations.readOnlyHint ? 'read' : tool.annotations.destructiveHint ? 'destructive' : 'write',
+    riskLevel: tool.riskLevel ?? (tool.annotations.readOnlyHint ? 'read' : tool.annotations.destructiveHint ? 'destructive' : 'write'),
     enabledByDefault: tool.annotations.readOnlyHint,
     inputSchema: toGatewayJsonSchema(tool),
   };

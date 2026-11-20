@@ -179,7 +179,7 @@ describe('gateway export', () => {
   it('exposes tools without the prefix and with valid JSON Schemas', () => {
     for (const tool of billyGatewayTools) {
       expect(tool.name.startsWith('billy_')).toBe(false);
-      // Reads are on by default; writes are 'write' (none deletes) and off by default.
+      // Reads are on by default; writes are 'write' (deleting only a draft never approved or sent) and off by default.
       expect([tool.riskLevel, tool.enabledByDefault]).toEqual(
         tool.riskLevel === 'read' ? ['read', true] : ['write', false],
       );
@@ -191,6 +191,12 @@ describe('gateway export', () => {
       'update_product',
       'create_draft_invoice',
       'approve_invoice',
+      'send_invoice',
+      'delete_draft_invoice',
+      'create_draft_bill',
+      'attach_bill_file',
+      'approve_bill',
+      'delete_draft_bill',
       'register_payment',
       'create_daybook_transaction',
     ]);

@@ -142,7 +142,7 @@ function errorFields(summary: ReturnType<typeof auditErrorSummary>) {
  * (HMAC-SHA-256 with the host's policy.pseudonymKey, else SHA-256), which
  * still tie the lines about one record together.
  */
-const RECORD_ID_FIELDS = ['contactId', 'productId', 'invoiceId', 'billId', 'accountId', 'cashAccountId', 'transactionId', 'daybookId'] as const;
+const RECORD_ID_FIELDS = ['contactId', 'contactPersonId', 'productId', 'invoiceId', 'billId', 'accountId', 'cashAccountId', 'transactionId', 'daybookId'] as const;
 
 /** Fields logged in clear text: values from fixed lists, dates, amounts, currency codes and paging. Extend per tool. */
 const ID_FIELDS = [
@@ -169,6 +169,8 @@ const FREE_TEXT_FIELDS = [
   'registrationNo',
   'description',
   'contactMessage',
+  'emailSubject',
+  'fileName',
 ] as const;
 
 /** Lists in a write (lines, contact persons, prices): only how many entries are logged. */

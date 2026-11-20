@@ -80,18 +80,27 @@ describe('BillyClient', () => {
     expect(() => new BillyClient({ accessToken: 'k', baseUrl: 'https://evil.test/v2' })).toThrow(/must be on/);
   });
 
-  it('sends only the writes on its fixed list, and never a DELETE', async () => {
+  it('sends only the writes on its fixed list, and a DELETE only of one invoice or bill', async () => {
     const fetchImpl = makeFetch(() => jsonResponse({ contacts: [] }, 200));
     const client = makeClient(fetchImpl);
     await expect(client.post('/organization', {})).rejects.toThrow('Refused');
     await expect(client.put('/accounts/a1', {})).rejects.toThrow('Refused');
     await expect(client.put('/organization', {})).rejects.toThrow('Refused');
-    await expect(client.post('/invoices/i1/emails', {})).rejects.toThrow('Refused');
     await expect(client.post('/invoiceDeliveries', {})).rejects.toThrow('Refused');
+    await expect(client.post('/files', { file: {} })).rejects.toThrow('Refused');
+    await expect(client.post('/users', {})).rejects.toThrow('Refused');
+    await expect(client.delete('/contacts/c1')).rejects.toThrow('Refused');
+    await expect(client.delete('/accounts/a1')).rejects.toThrow('Refused');
+    await expect(client.delete('/invoices')).rejects.toThrow('Refused');
+    await expect(client.delete('/invoices/i1/lines')).rejects.toThrow('Refused');
+    await expect(client.upload('/attachments', new Uint8Array([1]), 'application/pdf', 'a.pdf')).rejects.toThrow('Refused');
+    await expect(client.upload('/files', new Uint8Array([1]), 'application/pdf', 'a\r\nX-Other: 1.pdf')).rejects.toThrow('Refused');
     expect(fetchImpl).not.toHaveBeenCalled();
     await expect(client.post('/contacts', {})).resolves.toEqual({ contacts: [] });
     await expect(client.put('/contacts/c1', {})).resolves.toEqual({ contacts: [] });
-    expect('delete' in client).toBe(false);
+    await expect(client.post('/invoices/i1/emails', {})).resolves.toEqual({ contacts: [] });
+    await expect(client.delete('/invoices/i1')).resolves.toEqual({ contacts: [] });
+    await expect(client.delete('/bills/b1')).resolves.toEqual({ contacts: [] });
   });
 
   it('refuses unsafe base URLs without echoing credentials', () => {

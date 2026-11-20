@@ -1,6 +1,6 @@
 import { nestedFailuresAsStatus } from '../errors.js';
 import { encodePathParam } from '../path-params.js';
-import type { QueryValue, UpstreamClient } from './client.js';
+import type { QueryValue, UploadContentType, UpstreamClient } from './client.js';
 import { isCurrency, lastFour } from './values.js';
 
 /**
@@ -58,6 +58,7 @@ function embedded(value: unknown): Json[] | undefined {
 const STRING_OR_NUMBER_FIELDS = new Set(['invoiceNo']);
 const NUMBER_FIELDS = new Set([
   'cashAmount',
+  'fileSize',
   'cashExchangeRate',
   'feeAmount',
   'accountNo',
@@ -98,7 +99,7 @@ const BOOLEAN_FIELDS = new Set([
 ]);
 
 /** The number fields that are integers in the property tables (`integer`, not `float`), and the paging counts. */
-const INTEGER_FIELDS = new Set(['accountNo', 'priority', 'paymentTermsDays', 'fiscalYearEndMonth', 'page', 'pageCount', 'pageSize', 'total']);
+const INTEGER_FIELDS = new Set(['accountNo', 'fileSize', 'priority', 'paymentTermsDays', 'fiscalYearEndMonth', 'page', 'pageCount', 'pageSize', 'total']);
 
 /** Whether `value` has the documented type of `field` (or is null). */
 function hasFieldType(field: string, value: unknown): boolean {
@@ -647,6 +648,182 @@ export async function approveInvoice(client: UpstreamClient, input: { invoiceId:
   }
   const body = nestedFailuresAsStatus(await client.put(path, { invoice: { state: 'approved' } }));
   return shapeInvoice(firstChanged(body, 'invoices', input.invoiceId));
+}
+
+// ---------------------------------------------------------------------------
+// Sending an approved invoice, bills and their files, deleting drafts
+
+/**
+ * E-mail an approved invoice to one of its customer's contact persons, with
+ * POST /v2/invoices/:id/emails as the documentation's "Sending emails for
+ * invoices" shows it ({ email: { contactPersonId, emailSubject, emailBody } }).
+ * Read first, and refused without sending anything unless the invoice is an
+ * approved invoice or credit note and the contact person belongs to the
+ * invoice's customer and has an e-mail address. The documentation gives no
+ * answer shape, so only the invoice's id and the contact person's id are
+ * returned.
+ */
+export async function sendInvoiceEmail(
+  client: UpstreamClient,
+  input: { invoiceId: string; contactPersonId: string; emailSubject: string; emailBody: string },
+): Promise<Json> {
+  const path = idPath('invoices', input.invoiceId, 'invoiceId');
+  const invoice = single(await get(client, path), 'invoice', input.invoiceId);
+  if (invoice.state !== 'approved') {
+    throw new Error('Refused: only an approved invoice can be sent, and this invoice is not approved. Nothing was sent.');
+  }
+  const person = single(
+    await get(client, idPath('contactPersons', input.contactPersonId, 'contactPersonId')),
+    'contactPerson',
+    input.contactPersonId,
+  );
+  if (typeof invoice.contactId !== 'string' || invoice.contactId === '' || person.contactId !== invoice.contactId) {
+    throw new Error("Refused: the contact person does not belong to the invoice's customer. Nothing was sent.");
+  }
+  if (typeof person.email !== 'string' || !person.email.includes('@')) {
+    throw new Error('Refused: the contact person has no e-mail address in Billy. Nothing was sent.');
+  }
+  const email = { contactPersonId: input.contactPersonId, emailSubject: input.emailSubject, emailBody: input.emailBody };
+  nestedFailuresAsStatus(await client.post(`${path}/emails`, { email }));
+  return { sent: true, invoiceId: input.invoiceId, contactPersonId: input.contactPersonId };
+}
+
+export interface BillDraftInput {
+  contactId: string;
+  entryDate: string;
+  dueDate?: string;
+  currencyId: string;
+  suppliersInvoiceNo?: string;
+  voucherNo?: string;
+  taxMode?: 'incl' | 'excl';
+  lines: Array<{ accountId: string; taxRateId: string; description: string; amount: number }>;
+}
+
+function shapeBill(bill: Json): Json {
+  return { ...pick(bill, BILL_FIELDS), ...lines(bill.lines, BILL_LINE_FIELDS) };
+}
+
+/**
+ * A new bill (purchase voucher) as a draft: `state` is always "draft",
+ * whatever the input. Each line has the account, the VAT rate, a text and the
+ * amount: the required fields of a bill line in the documentation (billLines).
+ */
+export async function createDraftBill(client: UpstreamClient, input: BillDraftInput): Promise<Json> {
+  const bill: Json = {
+    ...pick(input as unknown as Json, ['contactId', 'entryDate', 'dueDate', 'currencyId', 'suppliersInvoiceNo', 'voucherNo', 'taxMode']),
+    state: 'draft',
+    lines: input.lines.map((line, index) => ({
+      ...pick(line as unknown as Json, ['accountId', 'taxRateId', 'description', 'amount']),
+      priority: index + 1,
+    })),
+  };
+  const body = nestedFailuresAsStatus(await client.post('/bills', { bill }));
+  return shapeBill(firstChanged(body, 'bills'));
+}
+
+/**
+ * Approve (book) a draft bill: reads it first and refuses, without sending
+ * anything, unless it is a draft. A PUT with only the state, as the
+ * documentation describes an update.
+ */
+export async function approveBill(client: UpstreamClient, input: { billId: string }): Promise<Json> {
+  const path = idPath('bills', input.billId, 'billId');
+  const current = single(await get(client, path), 'bill', input.billId);
+  if (current.state !== 'draft') {
+    throw new Error('Refused: only a draft bill can be approved, and this bill is not a draft. Nothing was sent.');
+  }
+  const body = nestedFailuresAsStatus(await client.put(path, { bill: { state: 'approved' } }));
+  return shapeBill(firstChanged(body, 'bills', input.billId));
+}
+
+/** The file types a bill's file may have: by the first bytes of the file, never by the name given. */
+const FILE_TYPES: ReadonlyArray<{ type: UploadContentType; extensions: readonly string[]; magic: readonly number[] }> = [
+  { type: 'application/pdf', extensions: ['pdf'], magic: [0x25, 0x50, 0x44, 0x46, 0x2d] },
+  { type: 'image/png', extensions: ['png'], magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+  { type: 'image/jpeg', extensions: ['jpg', 'jpeg'], magic: [0xff, 0xd8, 0xff] },
+];
+
+/** Largest file a bill takes through this server, in bytes. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Attach a file (the supplier's invoice or a receipt: PDF, PNG or JPEG) to a
+ * bill. The file is checked first (size, type by its first bytes, a name
+ * ending that matches), then the bill is read and must not be voided. Then
+ * the file is uploaded with POST /v2/files (the raw bytes, the name in
+ * X-Filename) and attached with POST /v2/attachments
+ * ({ ownerReference: "bill:<id>", fileId }), an attachment's owner and file
+ * in the documentation. The file's download address is never returned: it
+ * carries a token.
+ */
+export async function attachBillFile(
+  client: UpstreamClient,
+  input: { billId: string; fileName: string; contentBase64: string },
+): Promise<Json> {
+  const bytes = Buffer.from(input.contentBase64, 'base64');
+  if (bytes.length === 0 || bytes.length > MAX_FILE_BYTES) {
+    throw new Error(`Refused: the file must be between 1 byte and ${MAX_FILE_BYTES} bytes. Nothing was sent.`);
+  }
+  const kind = FILE_TYPES.find(entry => entry.magic.every((byte, index) => bytes[index] === byte));
+  if (!kind) throw new Error('Refused: the file is not a PDF, PNG or JPEG. Nothing was sent.');
+  const extension = input.fileName.toLowerCase().split('.').pop() ?? '';
+  if (!kind.extensions.includes(extension)) {
+    throw new Error("Refused: the file name's ending does not match the file's type (pdf, png, jpg). Nothing was sent.");
+  }
+  const bill = single(await get(client, idPath('bills', input.billId, 'billId')), 'bill', input.billId);
+  if (bill.state === 'voided') throw new Error('Refused: the bill is voided. Nothing was sent.');
+  const uploaded = firstChanged(
+    nestedFailuresAsStatus(await client.upload('/files', new Uint8Array(bytes), kind.type, input.fileName)),
+    'files',
+  );
+  const attachment = { ownerReference: `bill:${input.billId}`, fileId: uploaded.id };
+  const created = firstChanged(nestedFailuresAsStatus(await client.post('/attachments', { attachment })), 'attachments');
+  return {
+    attachment: pick(created, ['id', 'fileId', 'ownerReference']),
+    file: pick(uploaded, ['id', 'fileName', 'fileSize', 'fileType']),
+  };
+}
+
+/** Whether Billy's answer to a DELETE names the record as deleted (meta.deletedRecords.<plural>). */
+function deletedRecord(body: unknown, plural: string, id: string): boolean {
+  const deleted = asRecord(asRecord(asRecord(body)?.meta)?.deletedRecords)?.[plural];
+  return Array.isArray(deleted) && deleted.includes(id);
+}
+
+/** Never approved: no approval time. */
+function neverApproved(record: Json): boolean {
+  return record.approvedTime === undefined || record.approvedTime === null;
+}
+
+/**
+ * Delete a draft invoice that was never approved or sent: read first, and
+ * refused without sending anything unless its state is "draft", it has no
+ * approval time and its sent state is "unsent" (or not given). Billy answers
+ * a DELETE with the deleted ids under meta.deletedRecords; an answer without
+ * this invoice is an error.
+ */
+export async function deleteDraftInvoice(client: UpstreamClient, input: { invoiceId: string }): Promise<Json> {
+  const path = idPath('invoices', input.invoiceId, 'invoiceId');
+  const current = single(await get(client, path), 'invoice', input.invoiceId);
+  const unsent = current.sentState === undefined || current.sentState === null || current.sentState === 'unsent';
+  if (current.state !== 'draft' || !unsent || !neverApproved(current)) {
+    throw new Error('Refused: only a draft invoice that was never approved or sent can be deleted. Nothing was deleted.');
+  }
+  const body = nestedFailuresAsStatus(await client.delete(path));
+  if (!deletedRecord(body, 'invoices', input.invoiceId)) throw new UnexpectedAnswerError();
+  return { deleted: true, invoiceId: input.invoiceId };
+}
+
+/** Delete a draft bill that was never approved, as deleteDraftInvoice does for an invoice. */
+export async function deleteDraftBill(client: UpstreamClient, input: { billId: string }): Promise<Json> {
+  const path = idPath('bills', input.billId, 'billId');
+  const current = single(await get(client, path), 'bill', input.billId);
+  if (current.state !== 'draft' || !neverApproved(current)) {
+    throw new Error('Refused: only a draft bill that was never approved can be deleted. Nothing was deleted.');
+  }
+  const body = nestedFailuresAsStatus(await client.delete(path));
+  if (!deletedRecord(body, 'bills', input.billId)) throw new UnexpectedAnswerError();
+  return { deleted: true, billId: input.billId };
 }
 
 // ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ export interface BillyClientOptions {
 
 export type QueryValue = string | number | boolean | null | undefined;
 
-type HttpMethod = 'GET' | 'POST' | 'PUT';
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
 
 /** Header that carries the access token (https://www.billy.dk/api, "Authentication"); error text redaction follows it. */
 export const API_KEY_HEADER = 'X-Access-Token';
@@ -56,10 +56,11 @@ export const DEFAULT_BASE_URL = 'https://api.billysbilling.com/v2';
 
 /**
  * The only writes the client sends: method and path (relative to the base
- * URL). Anything else, a DELETE among them, is refused before it is sent,
- * whatever a tool or a policy says. The client has no delete method at all.
+ * URL). Anything else is refused before it is sent, whatever a tool or a
+ * policy says. The only DELETEs are of one invoice or one bill, which the
+ * tools send only after reading it and finding a draft that was never sent.
  */
-export const ALLOWED_WRITES: ReadonlyArray<{ method: 'POST' | 'PUT'; path: RegExp }> = [
+export const ALLOWED_WRITES: ReadonlyArray<{ method: 'POST' | 'PUT' | 'DELETE'; path: RegExp }> = [
   { method: 'POST', path: /^\/contacts$/ },
   { method: 'PUT', path: /^\/contacts\/[^/]+$/ },
   { method: 'POST', path: /^\/products$/ },
@@ -68,7 +69,29 @@ export const ALLOWED_WRITES: ReadonlyArray<{ method: 'POST' | 'PUT'; path: RegEx
   { method: 'PUT', path: /^\/invoices\/[^/]+$/ },
   { method: 'POST', path: /^\/bankPayments$/ },
   { method: 'POST', path: /^\/daybookTransactions$/ },
+  { method: 'POST', path: /^\/bills$/ },
+  { method: 'PUT', path: /^\/bills\/[^/]+$/ },
+  { method: 'POST', path: /^\/files$/ },
+  { method: 'POST', path: /^\/attachments$/ },
+  { method: 'POST', path: /^\/invoices\/[^/]+\/emails$/ },
+  { method: 'DELETE', path: /^\/invoices\/[^/]+$/ },
+  { method: 'DELETE', path: /^\/bills\/[^/]+$/ },
 ];
+
+/** The one path a file's bytes are uploaded to (POST /v2/files). */
+const FILES_PATH = '/files';
+
+/** A file's bytes as an upload's body, with its type and name. */
+class RawBody {
+  constructor(
+    readonly bytes: Uint8Array,
+    readonly contentType: UploadContentType,
+    readonly fileName: string,
+  ) {}
+}
+
+/** The file types an upload may have, by the Content-Type sent. */
+export type UploadContentType = 'application/pdf' | 'image/png' | 'image/jpeg';
 
 export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_RESPONSE_BYTES_LIMIT = 100 * 1024 * 1024;
@@ -124,6 +147,13 @@ export interface UpstreamClient {
   get<T>(path: string, query?: Record<string, QueryValue>): Promise<T>;
   post<T>(path: string, body?: unknown, query?: Record<string, QueryValue>): Promise<T>;
   put<T>(path: string, body?: unknown): Promise<T>;
+  /** DELETE of one record (only the paths in ALLOWED_WRITES). */
+  delete<T>(path: string): Promise<T>;
+  /**
+   * POST of a file's raw bytes (Billy's POST /v2/files): the body is the
+   * file, the name goes in X-Filename. Only the paths in ALLOWED_WRITES.
+   */
+  upload<T>(path: string, bytes: Uint8Array, contentType: UploadContentType, fileName: string): Promise<T>;
 }
 
 /**
@@ -139,6 +169,8 @@ export function readOnlyClient(client: UpstreamClient, toolName: string): Upstre
     get: (path, query) => client.get(path, query),
     post: refuse('POST'),
     put: refuse('PUT'),
+    delete: refuse('DELETE'),
+    upload: refuse('POST'),
   };
 }
 
@@ -211,6 +243,18 @@ export class BillyClient implements UpstreamClient {
     return this.request<T>('PUT', this.buildUrl(path), body);
   }
 
+  async delete<T>(path: string): Promise<T> {
+    return this.request<T>('DELETE', this.buildUrl(path));
+  }
+
+  async upload<T>(path: string, bytes: Uint8Array, contentType: UploadContentType, fileName: string): Promise<T> {
+    // The name goes in a header: only a plain name of printable ASCII, so nothing can be added to the request.
+    if (!/^[A-Za-z0-9 ._()-]{1,100}$/.test(fileName)) {
+      throw new Error('Refused: the file name must be letters, digits, spaces and . _ ( ) - only.');
+    }
+    return this.request<T>('POST', this.buildUrl(path), new RawBody(bytes, contentType, fileName));
+  }
+
   buildUrl(path: string, query?: Record<string, QueryValue>): string {
     if (!this.baseUrl) {
       throw new Error('Missing BILLY_BASE_URL. Set it in the MCP server environment.');
@@ -239,17 +283,25 @@ export class BillyClient implements UpstreamClient {
     };
   }
 
-  private async request<T>(method: HttpMethod, url: string, body?: unknown): Promise<T> {
+  private async request<T>(method: HttpMethod, url: string, body?: unknown | RawBody): Promise<T> {
     if (method !== 'GET') {
       // The fixed list of writes: anything else is refused before the token is put in a header.
       const path = new URL(url).pathname.slice(new URL(`${this.baseUrl}/`).pathname.length - 1);
       if (!ALLOWED_WRITES.some(entry => entry.method === method && entry.path.test(path))) {
         throw new Error(`Refused: ${method} to that Billy path is not among the writes this server sends.`);
       }
+      // A file's bytes go only to /files, and /files takes only a file's bytes.
+      if ((body instanceof RawBody) !== (path === FILES_PATH)) {
+        throw new Error('Refused: a file is uploaded only to /files, and only a file is sent there.');
+      }
     }
     const headers = this.headers();
     const init: RequestInit = { method, headers };
-    if (body !== undefined) {
+    if (body instanceof RawBody) {
+      headers['Content-Type'] = body.contentType;
+      headers['X-Filename'] = body.fileName;
+      init.body = body.bytes as unknown as RequestInit['body'];
+    } else if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(body);
     }
