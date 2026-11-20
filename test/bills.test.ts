@@ -5,6 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { billyToolCatalog, createBillyGateway, resolveBillyChange, type GatewayJsonObject } from '../src/gateway.js';
 import { BASE } from './helpers.js';
+import { MAX_FILE_BYTES } from '../src/billy/resources.js';
 
 const TOKEN = 'tttt-gggg-wwww-vvvv-1';
 const originalEnv = { ...process.env };
@@ -127,9 +128,9 @@ describe('bills', () => {
     expect(calls[2]?.body).toEqual({ attachment: { ownerReference: 'bill:b1', fileId: 'f1' } });
     expect(result.structuredContent).toEqual({
       attachment: { id: 'att1', fileId: 'f1', ownerReference: 'bill:b1' },
-      file: { id: 'f1', fileName: 'invoice.pdf', fileSize: PDF.length, fileType: 'application/pdf' },
+      file: { id: 'f1', fileSize: PDF.length, fileType: 'application/pdf' },
     });
-    expect(JSON.stringify(result)).not.toMatch(/download|token=/);
+    expect(JSON.stringify(result)).not.toMatch(/download|token=|invoice\.pdf/);
   });
 
   it('takes the type from the file itself, and refuses a mismatch, another type, a bad name or a voided bill', async () => {
@@ -139,6 +140,25 @@ describe('bills', () => {
       'POST /files': { files: [{ id: 'f1' }] },
       'POST /attachments': { attachments: [{ id: 'att1', fileId: 'f1' }] },
     };
+    const jpeg = billy(routes);
+    const jpg = await jpeg.gw.callTool('attach_bill_file', {
+      billId: 'b1',
+      fileName: 'receipt.jpg',
+      contentBase64: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2]).toString('base64'),
+    });
+    expect(jpg.isError).toBeUndefined();
+    expect(jpeg.calls[1]?.headers.get('content-type')).toBe('image/jpeg');
+
+    // The largest file is taken, one byte more is refused before anything is sent.
+    const largest = Buffer.alloc(MAX_FILE_BYTES, 0x20);
+    PDF.copy(largest);
+    const big = billy(routes);
+    expect((await big.gw.callTool('attach_bill_file', { billId: 'b1', fileName: 'big.pdf', contentBase64: largest.toString('base64') })).isError).toBeUndefined();
+    const tooBig = billy(routes);
+    const over = Buffer.concat([largest, Buffer.from(' ')]);
+    expect((await tooBig.gw.callTool('attach_bill_file', { billId: 'b1', fileName: 'big.pdf', contentBase64: over.toString('base64') })).isError).toBe(true);
+    expect(tooBig.calls).toHaveLength(0);
+
     const png = billy(routes);
     const ok = await png.gw.callTool('attach_bill_file', { billId: 'b1', fileName: 'Kvittering (1).PNG', contentBase64: PNG.toString('base64') });
     expect(ok.isError).toBeUndefined();
@@ -213,6 +233,9 @@ describe('deleting drafts', () => {
       { state: 'voided' },
       { state: 'draft', sentState: 'sent' },
       { state: 'draft', sentState: 'printed' },
+      { state: 'draft' },
+      { state: 'draft', sentState: null },
+      { state: 'draft', sentState: 'viewed' },
       { state: 'draft', approvedTime: '2026-11-19T10:00:00' },
     ]) {
       const { gw, calls } = billy({ 'GET /invoices/i1': { invoice: { id: 'i1', ...current } }, 'DELETE /invoices/i1': deleted });
@@ -275,6 +298,41 @@ describe('catalog and logs', () => {
       lines: 1,
     });
     expect(JSON.stringify([send, attach, bill])).not.toMatch(/Jens|Faktura|invoice\.pdf|Paper|V-7|JVBER/);
+  });
+
+  it('keeps the file name, the e-mail and the file out of results, errors and audit records when Billy refuses', async () => {
+    const records: Array<Readonly<Record<string, unknown>>> = [];
+    const results: unknown[] = [];
+    const echo = { errorMessage: 'Bad secret-name.pdf Private subject', validationErrors: { fileName: 'secret-name.pdf' } };
+    const failing = (step: 'files' | 'attachments' | 'emails') => {
+      const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(input)).pathname.slice(new URL(BASE).pathname.length);
+        const method = init?.method ?? 'GET';
+        if (method === 'GET' && path === '/bills/b1') return Response.json({ bill: { id: 'b1', state: 'draft' } });
+        if (method === 'GET' && path === '/invoices/i1') return Response.json({ invoice: { id: 'i1', state: 'approved', contactId: 'c1' } });
+        if (method === 'GET' && path === '/contactPersons/cp1') return Response.json({ contactPerson: { id: 'cp1', contactId: 'c1', email: 'buyer@example.test' } });
+        if (path === '/files') return step === 'files' ? Response.json(echo, { status: 422 }) : Response.json({ files: [{ id: 'f1', fileName: 'secret-name.pdf' }] });
+        if (path === '/attachments') return Response.json(echo, { status: 422 });
+        if (path.endsWith('/emails')) return Response.json(echo, { status: 422 });
+        return Response.json({}, { status: 404 });
+      });
+      return createBillyGateway({
+        accessToken: TOKEN,
+        baseUrl: BASE,
+        maxAttempts: 1,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+        policy: { enableWrites: true, audit: record => void records.push(record) },
+      });
+    };
+    const file = { billId: 'b1', fileName: 'secret-name.pdf', contentBase64: PDF.toString('base64') };
+    results.push(await failing('files').callTool('attach_bill_file', file));
+    results.push(await failing('attachments').callTool('attach_bill_file', file));
+    results.push(
+      await failing('emails').callTool('send_invoice', { invoiceId: 'i1', contactPersonId: 'cp1', emailSubject: 'Private subject', emailBody: 'Private body' }),
+    );
+    expect(results.every(result => (result as { isError?: boolean }).isError === true)).toBe(true);
+    expect(records.some(record => record.action === 'error')).toBe(true);
+    expect(JSON.stringify([results, records])).not.toMatch(/secret-name|Private|JVBER|buyer@/);
   });
 
   it("keeps the file, the e-mail's text and the file name out of the server's own audit records", async () => {

@@ -707,6 +707,14 @@ function shapeBill(bill: Json): Json {
  * A new bill (purchase voucher) as a draft: `state` is always "draft",
  * whatever the input. Each line has the account, the VAT rate, a text and the
  * amount: the required fields of a bill line in the documentation (billLines).
+ *
+ * `paymentDate` and `paymentAccount` are not sent. In the bills table they
+ * describe a bill paid at once from a payment account (a payment, which this
+ * server registers only with register_payment, after a person confirms it).
+ * The table marks paymentDate "immutable, required", as it marks fields Billy
+ * fills itself (an invoice's invoiceNo and sentState); the web app makes an
+ * unpaid bill without it. If Billy refuses a bill without it, the call fails
+ * with Billy's status and nothing is created.
  */
 export async function createDraftBill(client: UpstreamClient, input: BillDraftInput): Promise<Json> {
   const bill: Json = {
@@ -780,7 +788,8 @@ export async function attachBillFile(
   const created = firstChanged(nestedFailuresAsStatus(await client.post('/attachments', { attachment })), 'attachments');
   return {
     attachment: pick(created, ['id', 'fileId', 'ownerReference']),
-    file: pick(uploaded, ['id', 'fileName', 'fileSize', 'fileType']),
+    // Not the file name: it was chosen by the caller and may say anything.
+    file: pick(uploaded, ['id', 'fileSize', 'fileType']),
   };
 }
 
@@ -798,14 +807,15 @@ function neverApproved(record: Json): boolean {
 /**
  * Delete a draft invoice that was never approved or sent: read first, and
  * refused without sending anything unless its state is "draft", it has no
- * approval time and its sent state is "unsent" (or not given). Billy answers
+ * approval time and its sent state is exactly "unsent". Billy answers
  * a DELETE with the deleted ids under meta.deletedRecords; an answer without
  * this invoice is an error.
  */
 export async function deleteDraftInvoice(client: UpstreamClient, input: { invoiceId: string }): Promise<Json> {
   const path = idPath('invoices', input.invoiceId, 'invoiceId');
   const current = single(await get(client, path), 'invoice', input.invoiceId);
-  const unsent = current.sentState === undefined || current.sentState === null || current.sentState === 'unsent';
+  // Billy documents sentState as required (default "unsent"): an invoice that does not say "unsent" is not deleted.
+  const unsent = current.sentState === 'unsent';
   if (current.state !== 'draft' || !unsent || !neverApproved(current)) {
     throw new Error('Refused: only a draft invoice that was never approved or sent can be deleted. Nothing was deleted.');
   }

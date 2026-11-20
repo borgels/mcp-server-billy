@@ -14,12 +14,15 @@ attachments and contactPersons resources). Not tried against a live company.
   bytes, then `POST /attachments` with `ownerReference: bill:<id>`. The type
   is read from the file's first bytes; the name is plain ASCII and its ending
   must match. Only `/files` takes a file's bytes, and only a file is sent
-  there. The download address is never returned.
+  there. The download address and the file name are never returned.
 - `approve_bill`: approve (book) a draft bill; anything else is refused.
+- `create_draft_bill` sends no `paymentDate` or `paymentAccount` (a bill paid
+  at once); the documentation marks `paymentDate` required, as it marks fields
+  Billy fills itself. Not tried against a live company.
 - `send_invoice`: e-mail an approved invoice to a contact person of its
   customer who has an e-mail address. Not an e-invoice.
 - `delete_draft_invoice` and `delete_draft_bill`: only a draft that was never
-  approved or sent, read first; Billy's answer must name the record under
+  approved or sent (an invoice's sent state exactly `unsent`), read first; Billy's answer must name the record under
   `meta.deletedRecords`. The client's only DELETEs are these two paths. In the
   gateway they are ordinary writes (`riskLevel: write`, a new optional
   `riskLevel` on a tool definition); their MCP annotations say

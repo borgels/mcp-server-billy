@@ -213,7 +213,7 @@ async function catalogFetch(input: string | URL | Request, init?: RequestInit): 
   if (init?.method === 'DELETE') return Response.json({ meta: { deletedRecords: { invoices: ['i1'], bills: ['b2'] } } });
   if (path.endsWith('/emails')) return Response.json({});
   if (path.endsWith('/invoices/i2')) return Response.json({ invoice: { id: 'i2', state: 'approved', contactId: 'c1' } });
-  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft' }, invoices: [{ id: 'i1' }] });
+  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft', sentState: 'unsent' }, invoices: [{ id: 'i1' }] });
   if (path.includes('/contactPersons/')) return Response.json({ contactPerson: { id: 'cp1', contactId: 'c1', email: 'buyer@example.test' } });
   if (path.endsWith('/bills/b2')) return Response.json({ bill: { id: 'b2', state: 'draft' }, bills: [{ id: 'b2' }] });
   if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', organizationId: 'x1', type: 'bill', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
