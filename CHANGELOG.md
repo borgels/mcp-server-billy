@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.0
+
+Bookkeeper's everyday work (#9), after Billy's API documentation
+(https://www.billy.dk/api: "Creating and using attachments", "Sending emails
+for invoices", "Deleting a record", and the bills, billLines, files,
+attachments and contactPersons resources). Not tried against a live company.
+
+- `create_draft_bill`: a bill (purchase voucher) as a draft, with lines of
+  account, VAT rate, text and amount.
+- `attach_bill_file`: the supplier's invoice or a receipt (PDF, PNG, JPEG, at
+  most 10 MB, base64) to a bill that is not voided: `POST /files` with the raw
+  bytes, then `POST /attachments` with `ownerReference: bill:<id>`. The type
+  is read from the file's first bytes; the name is plain ASCII and its ending
+  must match. Only `/files` takes a file's bytes, and only a file is sent
+  there. The download address and the file name are never returned.
+- `approve_bill`: approve (book) a draft bill; anything else is refused.
+- `create_draft_bill` sends no `paymentDate` or `paymentAccount` (a bill paid
+  at once); the documentation marks `paymentDate` required, as it marks fields
+  Billy fills itself. Not tried against a live company.
+- `send_invoice`: e-mail an approved invoice to a contact person of its
+  customer who has an e-mail address. Not an e-invoice.
+- `delete_draft_invoice` and `delete_draft_bill`: only a draft that was never
+  approved or sent (an invoice's sent state exactly `unsent`), read first; Billy's answer must name the record under
+  `meta.deletedRecords`. The client's only DELETEs are these two paths. In the
+  gateway they are ordinary writes (`riskLevel: write`, a new optional
+  `riskLevel` on a tool definition); their MCP annotations say
+  `destructiveHint`.
+- `change` actions `send`, `attach`, `delete` and the record `bill`; the
+  e-mail's subject and the file name are hashed in the server's own audit, the
+  contact person's id is a pseudonym, and the file and the e-mail's text are
+  never logged.
+
 ## 0.1.0
 
 First version, built from `mcp-server-template` after Billy's public API

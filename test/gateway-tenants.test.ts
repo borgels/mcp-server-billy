@@ -194,17 +194,33 @@ const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
   approve_invoice: { invoiceId: 'i1' },
   register_payment: { billId: 'b1', cashAccountId: 'a1', amount: 100, entryDate: '2026-11-19' },
   create_daybook_transaction: { entryDate: '2026-11-19', lines: [{ accountId: 'a1', amount: 10, side: 'debit' }] },
+  send_invoice: { invoiceId: 'i2', contactPersonId: 'cp1', emailSubject: 'Invoice', emailBody: 'Here is the invoice.' },
+  delete_draft_invoice: { invoiceId: 'i1' },
+  create_draft_bill: {
+    contactId: 'c1',
+    entryDate: '2026-11-19',
+    currencyId: 'DKK',
+    lines: [{ accountId: 'a1', taxRateId: 't1', description: 'Paper', amount: 100 }],
+  },
+  attach_bill_file: { billId: 'b2', fileName: 'receipt.pdf', contentBase64: Buffer.from('%PDF-1.4 test').toString('base64') },
+  approve_bill: { billId: 'b2' },
+  delete_draft_bill: { billId: 'b2' },
 };
 
 /** Answers that let every tool run to its end: a draft invoice, an approved unpaid bill and a payment account. */
-async function catalogFetch(input: string | URL | Request): Promise<Response> {
+async function catalogFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
   const path = new URL(String(input)).pathname;
-  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft' }, invoices: [{ id: 'i1' }] });
+  if (init?.method === 'DELETE') return Response.json({ meta: { deletedRecords: { invoices: ['i1'], bills: ['b2'] } } });
+  if (path.endsWith('/emails')) return Response.json({});
+  if (path.endsWith('/invoices/i2')) return Response.json({ invoice: { id: 'i2', state: 'approved', contactId: 'c1' } });
+  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft', sentState: 'unsent' }, invoices: [{ id: 'i1' }] });
+  if (path.includes('/contactPersons/')) return Response.json({ contactPerson: { id: 'cp1', contactId: 'c1', email: 'buyer@example.test' } });
+  if (path.endsWith('/bills/b2')) return Response.json({ bill: { id: 'b2', state: 'draft' }, bills: [{ id: 'b2' }] });
   if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', organizationId: 'x1', type: 'bill', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
   if (path.includes('/accounts/')) return Response.json({ account: { id: 'a1', isPaymentEnabled: true, currencyId: 'DKK' } });
   // Every list and record root key the tools read, and one changed record for every write.
   const roots = ['organization', 'contact', 'product'];
-  const lists = ['contacts', 'products', 'invoices', 'bills', 'accounts', 'postings', 'daybooks', 'daybookTransactions', 'taxRates', 'bankPayments'];
+  const lists = ['contacts', 'products', 'invoices', 'bills', 'accounts', 'postings', 'daybooks', 'daybookTransactions', 'taxRates', 'bankPayments', 'files', 'attachments'];
   // A record asked for by id answers with that id; the company and lists with x1.
   const asked = /\/(?:contacts|products)\/([^/]+)$/.exec(path)?.[1];
   return Response.json({
