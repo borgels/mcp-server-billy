@@ -1,7 +1,7 @@
 // Failure metadata on gateway error results: the upstream API's HTTP status and its request id (a UUID or hex id
 // only), for a host that counts failures without reading their text. Never the body, the vendor's code or message.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { failureMetadata, BillyHttpError, REQUEST_ID_HEADERS, requestIdFrom, vendorRequestId } from '../src/errors.js';
+import { failureMetadata, BillyHttpError, REQUEST_ID_HEADERS, requestIdFrom, UpstreamRedirectError, vendorRequestId } from '../src/errors.js';
 import { createBillyGateway } from '../src/gateway.js';
 import { BASE } from './helpers.js';
 
@@ -80,6 +80,10 @@ describe('vendorRequestId', () => {
     });
     expect(failureMetadata(new BillyHttpError({ status: 500, url: `${BASE}/items/1`, requestId: 'Jane Doe' }))).toEqual({
       httpStatus: 500,
+    });
+    expect(failureMetadata(new UpstreamRedirectError('Refused.', { status: 302, requestId: UUID }))).toEqual({
+      httpStatus: 302,
+      requestId: UUID,
     });
     expect(failureMetadata(new Error('boom'))).toBeUndefined();
     expect(failureMetadata('boom')).toBeUndefined();
