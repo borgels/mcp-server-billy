@@ -1,6 +1,6 @@
 {
   "name": "mcp-server-billy",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "mcpName": "io.github.borgels/mcp-server-billy",
   "description": "Unofficial MCP server for the Billy accounting API (Denmark): contacts, products, invoices, bills, accounts, postings and daybooks, with opt-in drafts, approval and payment registration.",
   "type": "module",
