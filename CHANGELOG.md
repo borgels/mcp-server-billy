@@ -3,7 +3,7 @@
 ## 0.3.0
 
 - Gateway error results carry failure metadata: when the upstream API
-  answered with an HTTP error, the result has `failure: { httpStatus,
+  answered with an HTTP error (or a redirect, which is refused), the result has `failure: { httpStatus,
   requestId? }`, so a host can count failures by status without reading
   their text. `requestId` is the vendor's own id from a response header
   (`REQUEST_ID_HEADERS`, the vendor's documented header first), kept only

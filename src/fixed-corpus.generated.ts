@@ -415,6 +415,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "Update product (Billy)",
   "Updated contact.",
   "Updated product.",
+  "UpstreamRedirectError",
   "User-Agent",
   "Voucher number.",
   "WARNING: MCP_HTTP_ALLOW_UNAUTHENTICATED=true and no MCP_HTTP_TOKEN: /mcp on ",

@@ -96,6 +96,16 @@ describe('gateway error results', () => {
     expect(serialised).not.toContain('E_NOPE');
   });
 
+  it('carry the status and the request id of a refused redirect, never its Location', async () => {
+    const result = await gatewayAnswering(302, {
+      [REQUEST_ID_HEADERS[0]!]: UUID,
+      location: 'https://elsewhere.example/Jane-Doe',
+    }).callTool(TOOL, INPUT);
+    expect(result.isError).toBe(true);
+    expect(result.failure).toEqual({ httpStatus: 302, requestId: UUID });
+    expect(JSON.stringify(result)).not.toContain('Jane-Doe');
+  });
+
   it('carry the status alone when the request id is not in the form of one', async () => {
     const result = await gatewayAnswering(422, { 'x-request-id': 'Jane Doe <jane@example.com>' }).callTool(TOOL, INPUT);
     expect(result.failure).toEqual({ httpStatus: 422 });
