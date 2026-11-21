@@ -1,5 +1,5 @@
 import { ConfigError, readEnvBoolean, readEnvInteger, readEnvString, type Env } from '../config-env.js';
-import { BillyHttpError, describeUrl, parseRetryAfterMs, SecretRedactor } from '../errors.js';
+import { BillyHttpError, describeUrl, parseRetryAfterMs, requestIdFrom, SecretRedactor } from '../errors.js';
 import { USER_AGENT } from '../version.js';
 
 export interface BillyClientOptions {
@@ -319,6 +319,7 @@ export class BillyClient implements UpstreamClient {
           status: response.status,
           url: describeUrl(url),
           retryAfter: response.headers.get('retry-after') ?? undefined,
+          requestId: requestIdFrom(response.headers),
         });
       }
 
