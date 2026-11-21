@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1
+
+- `register_payment` is no longer marked `requiresConfirmation`. It records a
+  payment in the books and moves no money, so a host carries it out as its
+  role allows, like any other write. The mark is meant for a call that moves
+  money, and no tool here does; `requiresConfirmation` is now false for every
+  tool. Nothing else changes: the same checks before the payment is
+  registered, and the same `change` with `movesMoney: false`.
+
 ## 0.2.0
 
 Bookkeeper's everyday work (#9), after Billy's API documentation
