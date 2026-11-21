@@ -710,7 +710,7 @@ function shapeBill(bill: Json): Json {
  *
  * `paymentDate` and `paymentAccount` are not sent. In the bills table they
  * describe a bill paid at once from a payment account (a payment, which this
- * server registers only with register_payment, after a person confirms it).
+ * server registers only with register_payment).
  * The table marks paymentDate "immutable, required", as it marks fields Billy
  * fills itself (an invoice's invoiceNo and sentState); the web app makes an
  * unpaid bill without it. If Billy refuses a bill without it, the call fails

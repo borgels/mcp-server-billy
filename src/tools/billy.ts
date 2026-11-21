@@ -155,7 +155,8 @@ export interface ToolDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
   change?: BillyChangeSpec;
   /**
    * True when a person should confirm each call outside the chat before it
-   * runs: registering a payment. Published in the gateway catalog.
+   * runs: a call that moves money. No tool here does (registering a payment
+   * only records it in the books). Published in the gateway catalog.
    */
   requiresConfirmation?: boolean;
   /** Cross-field checks the schema shape cannot express. Returns a refusal or undefined. */
@@ -746,7 +747,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'billy_register_payment',
     title: 'Register payment (Billy)',
-    description: `Register in the books that an approved invoice was paid (money in) or a bill was paid (money out), on a payment account. It moves no money. Reads the invoice or bill and the account first, and refuses when it is not approved, already paid, a credit note, has no positive balance, the amount is more than what is owed, the currency is unknown, or the account is not a payment account in the same currency. Registrations of one document run one at a time in this server; a payment registered in Billy by someone else at the same moment is not seen. A person should confirm each call. ${WRITE_NOTE}`,
+    description: `Register in the books that an approved invoice was paid (money in) or a bill was paid (money out), on a payment account. It moves no money. Reads the invoice or bill and the account first, and refuses when it is not approved, already paid, a credit note, has no positive balance, the amount is more than what is owed, the currency is unknown, or the account is not a payment account in the same currency. Registrations of one document run one at a time in this server; a payment registered in Billy by someone else at the same moment is not seen. ${WRITE_NOTE}`,
     inputShape: {
       invoiceId: recordId('The invoice that was paid. Give this or billId.').optional(),
       billId: recordId('The bill that was paid. Give this or invoiceId.').optional(),
@@ -771,7 +772,6 @@ export const BILLY_TOOLS: ToolDefinition[] = [
       amount: 'amount',
       entryDate: 'date',
     }),
-    requiresConfirmation: true,
     check: input =>
       (input.invoiceId === undefined) === (input.billId === undefined) ? 'Give exactly one of invoiceId and billId.' : undefined,
     handler: async (client, input) => registerPayment(client, input as never),

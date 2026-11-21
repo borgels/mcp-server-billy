@@ -345,7 +345,7 @@ describe('change resolution for a host log', () => {
         action: 'register_payment',
         record: 'payment',
         movesMoney: false,
-        requiresConfirmation: true,
+        requiresConfirmation: false,
         values: { invoiceId: 'i1', cashAccountId: 'a1', amount: 1250.5, entryDate: '2026-11-19' },
       },
     });
@@ -369,8 +369,8 @@ describe('change resolution for a host log', () => {
     expect(resolveBillyChange('delete_contact', {}).ok).toBe(false);
   });
 
-  it('marks only register_payment as needing a person to confirm', () => {
-    expect(billyToolCatalog.filter(entry => entry.requiresConfirmation).map(entry => entry.name)).toEqual(['register_payment']);
+  it('marks no tool as needing a person to confirm: none moves money, registering a payment only records it', () => {
+    expect(billyToolCatalog.filter(entry => entry.requiresConfirmation).map(entry => entry.name)).toEqual([]);
   });
 });
 

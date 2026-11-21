@@ -335,7 +335,7 @@ export const FIXED_CORPUS: readonly string[] = [
   "Refusing to listen on a non-loopback address (from MCP_HTTP_HOST or HOST) without MCP_HTTP_TOKEN: anyone who can reach this address ",
   "Refusing to send the access token over a scheme other than https://. Use https:// (loopback http:// is allowed for local mocks).",
   "Refusing to send the access token to that host: BILLY_BASE_URL must be on ",
-  "Register in the books that an approved invoice was paid (money in) or a bill was paid (money out), on a payment account. It moves no money. Reads the invoice or bill and the account first, and refuses when it is not approved, already paid, a credit note, has no positive balance, the amount is more than what is owed, the currency is unknown, or the account is not a payment account in the same currency. Registrations of one document run one at a time in this server; a payment registered in Billy by someone else at the same moment is not seen. A person should confirm each call. ",
+  "Register in the books that an approved invoice was paid (money in) or a bill was paid (money out), on a payment account. It moves no money. Reads the invoice or bill and the account first, and refuses when it is not approved, already paid, a credit note, has no positive balance, the amount is more than what is owed, the currency is unknown, or the account is not a payment account in the same currency. Registrations of one document run one at a time in this server; a payment registered in Billy by someone else at the same moment is not seen. ",
   "Register payment (Billy)",
   "Registered payment.",
   "Request body could not be read (connection aborted)",
