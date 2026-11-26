@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0
+
+Credit an approved invoice and change a draft invoice (#20), after Billy's API
+documentation (https://www.billy.dk/api: the invoices and invoiceLines
+resources, "Updating a record"). Not tried against a live company.
+
+- `create_credit_note`: a credit note as a draft for an approved invoice,
+  whole or for chosen lines (each at most the quantity and unit price on the
+  invoice): `POST /invoices` with `type: "creditNote"` and
+  `creditedInvoiceId`. The documentation names the type only as "an invoice
+  or a credit note" without its literal values; `creditNote` is assumed.
+  Refused unless the source is an approved, ordinary invoice; a whole credit
+  is refused when a credit note that is not voided already exists. Approve it
+  with `approve_invoice` and e-mail it with `send_invoice`, unchanged.
+- `update_invoice_draft`: change a draft invoice's date, payment terms, VAT
+  mode, message or lines with `PUT /invoices/{id}`, read just before; anything
+  but an ordinary draft is refused. The customer is not changed: the
+  documentation marks `contact` immutable. The documentation also says of
+  `entryDate` and `lines` that they "must not be set if the invoice has already
+  been created", while marking neither immutable and describing how lines
+  given on an update replace the existing ones; they are sent, and Billy's
+  status is returned if it refuses them.
+- No new write: both use `POST /invoices` and `PUT /invoices/{id}`, already in
+  the client's fixed list. Both are `write` and move no money.
+
 ## 0.4.1
 
 - Licensor and copyright holder corrected to Borgels Services ApS in `LICENSE`,

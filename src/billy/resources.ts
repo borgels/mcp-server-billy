@@ -650,6 +650,157 @@ export async function approveInvoice(client: UpstreamClient, input: { invoiceId:
   return shapeInvoice(firstChanged(body, 'invoices', input.invoiceId));
 }
 
+export interface InvoiceDraftUpdateInput {
+  invoiceId: string;
+  entryDate?: string;
+  paymentTermsDays?: number;
+  taxMode?: 'incl' | 'excl';
+  contactMessage?: string;
+  lines?: InvoiceDraftInput['lines'];
+}
+
+/**
+ * Change a draft invoice with PUT /v2/invoices/:id: only the fields given
+ * ("Only properties that you set in the `invoice` hash will be updated").
+ * Lines, when given, replace the invoice's lines ("If this parameter is set,
+ * any existing lines for this invoice will be deleted before adding the new
+ * ones"). The customer is not changed: the documentation marks `contact`
+ * immutable. Read just before the PUT, and refused without sending anything
+ * unless it is an ordinary invoice (not a credit note) in state "draft" with
+ * no approval time. `state` is never sent, so the draft stays a draft.
+ */
+export async function updateInvoiceDraft(client: UpstreamClient, input: InvoiceDraftUpdateInput): Promise<Json> {
+  const path = idPath('invoices', input.invoiceId, 'invoiceId');
+  const current = single(await get(client, path), 'invoice', input.invoiceId);
+  if (current.state !== 'draft' || !neverApproved(current)) {
+    throw new Error('Refused: only a draft invoice can be changed, and this invoice is not a draft. Nothing was sent.');
+  }
+  if (current.type !== 'invoice') {
+    throw new Error(
+      'Refused: only an ordinary draft invoice can be changed here, not a draft credit note. Delete the draft credit note and make a new one. Nothing was sent.',
+    );
+  }
+  const invoice: Json = pick(input as unknown as Json, ['entryDate', 'paymentTermsDays', 'taxMode', 'contactMessage']);
+  if (input.lines) {
+    invoice.lines = input.lines.map((line, index) => ({
+      ...pick(line as unknown as Json, ['productId', 'description', 'quantity', 'unitPrice']),
+      priority: index + 1,
+    }));
+  }
+  const body = nestedFailuresAsStatus(await client.put(path, { invoice }));
+  return shapeInvoice(firstChanged(body, 'invoices', input.invoiceId));
+}
+
+export interface CreditNoteInput {
+  invoiceId: string;
+  entryDate: string;
+  contactMessage?: string;
+  lines?: Array<{ lineId: string; quantity?: number; unitPrice?: number }>;
+}
+
+/** A line of the invoice being credited, with the fields a credit note line is made from. */
+function creditableLine(line: Json): Json & { id: string; productId: string; quantity: number; unitPrice: number } {
+  const quantity = line.quantity === undefined || line.quantity === null ? 1 : line.quantity;
+  if (
+    typeof line.id !== 'string' ||
+    typeof line.productId !== 'string' ||
+    line.productId === '' ||
+    typeof quantity !== 'number' ||
+    !Number.isFinite(quantity) ||
+    typeof line.unitPrice !== 'number' ||
+    !Number.isFinite(line.unitPrice)
+  ) {
+    throw new UnexpectedAnswerError();
+  }
+  return { ...line, id: line.id, productId: line.productId, quantity, unitPrice: line.unitPrice };
+}
+
+/** Whether a line carries a discount (a discount mode is set). */
+function hasDiscount(line: Json): boolean {
+  return typeof line.discountMode === 'string' && line.discountMode !== '';
+}
+
+/**
+ * A credit note for an approved invoice, as a draft: POST /v2/invoices with
+ * `type: "creditNote"` and `creditedInvoiceId` (the invoices resource:
+ * "Whether to create an invoice or a credit note", and the `creditedInvoice`
+ * belongs-to). The customer, currency, VAT mode, exchange rate and payment
+ * terms are those of the invoice. Lines are copied from the invoice's lines
+ * with positive quantities and prices, as on the invoice: the credit note's
+ * type is what makes them a credit.
+ *
+ * Without `lines` the whole invoice is credited; that is refused when the
+ * invoice already has a credit note that is not voided. With `lines`, only
+ * those lines of the invoice, each with at most its quantity and unit price; a
+ * line with a discount can only be credited whole. Read first, and refused
+ * without sending anything unless the invoice is an ordinary invoice (not a
+ * credit note) in state "approved". `state` is always "draft": it is approved
+ * with approve_invoice and e-mailed with send_invoice, as an invoice is.
+ */
+export async function createCreditNote(client: UpstreamClient, input: CreditNoteInput): Promise<Json> {
+  const source = single(
+    await get(client, idPath('invoices', input.invoiceId, 'invoiceId'), { include: 'invoice.lines:embed' }),
+    'invoice',
+    input.invoiceId,
+  );
+  if (source.state !== 'approved') {
+    throw new Error('Refused: only an approved (booked) invoice can be credited, and this invoice is not approved. Nothing was sent.');
+  }
+  if (source.type !== 'invoice') {
+    throw new Error('Refused: only an ordinary invoice can be credited, not a credit note. Nothing was sent.');
+  }
+  const sourceLines = (embedded(source.lines) ?? []).map(creditableLine);
+  if (sourceLines.length === 0) throw new UnexpectedAnswerError();
+
+  let creditLines: Json[];
+  if (input.lines === undefined) {
+    // The documented filter on the invoices list: "Filter by creditedInvoiceId belonging to a specific Invoice".
+    const earlier = list(await get(client, '/invoices', { creditedInvoiceId: input.invoiceId, pageSize: 100 }), 'invoices');
+    if (earlier.some(note => note.creditedInvoiceId === input.invoiceId && note.state !== 'voided')) {
+      throw new Error(
+        'Refused: this invoice already has a credit note. Credit selected lines instead, or void the earlier credit note in Billy. Nothing was sent.',
+      );
+    }
+    creditLines = sourceLines.map(line => creditLine(line));
+  } else {
+    creditLines = input.lines.map(selection => {
+      const line = sourceLines.find(candidate => candidate.id === selection.lineId);
+      if (!line) throw new Error('Refused: a line given is not a line of this invoice. Nothing was sent.');
+      const quantity = selection.quantity ?? line.quantity;
+      const unitPrice = selection.unitPrice ?? line.unitPrice;
+      if (quantity > line.quantity || unitPrice > line.unitPrice) {
+        throw new Error("Refused: a line's quantity or unit price is more than on the invoice. Nothing was sent.");
+      }
+      if (hasDiscount(line) && (quantity !== line.quantity || unitPrice !== line.unitPrice)) {
+        throw new Error('Refused: a line with a discount can only be credited whole. Nothing was sent.');
+      }
+      return creditLine(line, quantity, unitPrice);
+    });
+  }
+
+  const invoice: Json = {
+    type: 'creditNote',
+    creditedInvoiceId: input.invoiceId,
+    ...pick(source, ['contactId', 'currencyId', 'paymentTermsDays', 'taxMode', 'exchangeRate']),
+    entryDate: input.entryDate,
+    ...(input.contactMessage === undefined ? {} : { contactMessage: input.contactMessage }),
+    state: 'draft',
+    lines: creditLines.map((line, index) => ({ ...line, priority: index + 1 })),
+  };
+  const body = nestedFailuresAsStatus(await client.post('/invoices', { invoice }));
+  return shapeInvoice(firstChanged(body, 'invoices'));
+}
+
+/** A credit note line from an invoice line: product, text, quantity, unit price and any discount. */
+function creditLine(line: Json & { quantity: number; unitPrice: number }, quantity = line.quantity, unitPrice = line.unitPrice): Json {
+  return {
+    ...pick(line, ['productId', 'description']),
+    quantity,
+    unitPrice,
+    ...(hasDiscount(line) ? pick(line, ['discountText', 'discountMode', 'discountValue']) : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Sending an approved invoice, bills and their files, deleting drafts
 
