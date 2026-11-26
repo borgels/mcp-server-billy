@@ -12,7 +12,9 @@ resources, "Updating a record"). Not tried against a live company.
   `creditedInvoiceId`. The documentation names the type only as "an invoice
   or a credit note" without its literal values; `creditNote` is assumed.
   Refused unless the source is an approved, ordinary invoice; a whole credit
-  is refused when a credit note that is not voided already exists. Approve it
+  is refused when a credit note that is not voided already exists (every page
+  of the invoice's credit notes is read; more than 5000 is refused). Payment
+  terms are copied as `paymentTermsMode` and `paymentTermsDays`. Approve it
   with `approve_invoice` and e-mail it with `send_invoice`, unchanged.
 - `update_invoice_draft`: change a draft invoice's date, payment terms, VAT
   mode, message or lines with `PUT /invoices/{id}`, read just before; anything

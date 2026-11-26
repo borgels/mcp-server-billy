@@ -52,6 +52,7 @@ const APPROVED = {
   sentState: 'sent',
   contactId: 'c1',
   currencyId: 'DKK',
+  paymentTermsMode: 'net',
   paymentTermsDays: 8,
   taxMode: 'excl',
   approvedTime: '2026-11-20T10:00:00Z',
@@ -88,6 +89,7 @@ describe('create_credit_note', () => {
     expect(calls[0]?.query.get('include')).toBe('invoice.lines:embed');
     expect(calls[1]).toMatchObject({ method: 'GET', path: '/invoices' });
     expect(calls[1]?.query.get('creditedInvoiceId')).toBe('i1');
+    expect(calls[1]?.query.get('page')).toBe('1');
     expect(calls[2]?.method).toBe('POST');
     expect(calls[2]?.body).toEqual({
       invoice: {
@@ -95,6 +97,7 @@ describe('create_credit_note', () => {
         creditedInvoiceId: 'i1',
         contactId: 'c1',
         currencyId: 'DKK',
+        paymentTermsMode: 'net',
         paymentTermsDays: 8,
         taxMode: 'excl',
         entryDate: '2026-11-26',
@@ -188,6 +191,39 @@ describe('create_credit_note', () => {
 
     const voided = billy(creditRoutes({}, [{ id: 'cn0', type: 'creditNote', creditedInvoiceId: 'i1', state: 'voided' }]));
     expect((await call(voided.gw, 'create_credit_note', { invoiceId: 'i1', entryDate: '2026-11-26' })).isError).toBeUndefined();
+  });
+
+  it('reads every page of earlier credit notes: a credit note that is not voided on page 2 refuses a whole credit', async () => {
+    const voided = Array.from({ length: 100 }, (_, n) => ({ id: `v${n}`, type: 'creditNote', creditedInvoiceId: 'i1', state: 'voided' }));
+    const pages: Record<string, unknown[]> = { '1': voided, '2': [{ id: 'cn7', type: 'creditNote', creditedInvoiceId: 'i1', state: 'approved' }] };
+    const { gw, calls } = billy({
+      ...creditRoutes(),
+      'GET /invoices': (c: Call) => {
+        const page = c.query.get('page') ?? '1';
+        return { invoices: pages[page] ?? [], meta: { paging: { page: Number(page), pageCount: 2, pageSize: 100, total: 101 } } };
+      },
+    });
+    const refused = await call(gw, 'create_credit_note', { invoiceId: 'i1', entryDate: '2026-11-26' });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toContain('already has a credit note');
+    expect(calls.filter(c => c.path === '/invoices').map(c => c.query.get('page'))).toEqual(['1', '2']);
+    expect(calls.some(c => c.method === 'POST')).toBe(false);
+  });
+
+  it('refuses a whole credit when there are more credit notes than it reads', async () => {
+    const page = (n: number) =>
+      Array.from({ length: 1000 }, (_, i) => ({ id: `v${n}-${i}`, type: 'creditNote', creditedInvoiceId: 'i1', state: 'voided' }));
+    const { gw, calls } = billy({
+      ...creditRoutes(),
+      'GET /invoices': (c: Call) => ({
+        invoices: page(Number(c.query.get('page'))),
+        meta: { paging: { page: Number(c.query.get('page')), pageCount: 9, pageSize: 1000, total: 9000 } },
+      }),
+    });
+    const refused = await call(gw, 'create_credit_note', { invoiceId: 'i1', entryDate: '2026-11-26' });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toContain('too many credit notes');
+    expect(calls.some(c => c.method === 'POST')).toBe(false);
   });
 
   it('is booked and e-mailed with the tools that exist', async () => {

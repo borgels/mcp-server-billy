@@ -664,8 +664,11 @@ export interface InvoiceDraftUpdateInput {
  * ("Only properties that you set in the `invoice` hash will be updated").
  * Lines, when given, replace the invoice's lines ("If this parameter is set,
  * any existing lines for this invoice will be deleted before adding the new
- * ones"). The customer is not changed: the documentation marks `contact`
- * immutable. Read just before the PUT, and refused without sending anything
+ * ones"). The documentation also says of `entryDate` and `lines` that they
+ * "must not be set if the invoice has already been created", but marks
+ * neither immutable; they are sent, and Billy's status is returned if it
+ * refuses them. The customer is not changed: the documentation marks
+ * `contact` immutable. Read just before the PUT, and refused without sending anything
  * unless it is an ordinary invoice (not a credit note) in state "draft" with
  * no approval time. `state` is never sent, so the draft stays a draft.
  */
@@ -724,8 +727,9 @@ function hasDiscount(line: Json): boolean {
  * A credit note for an approved invoice, as a draft: POST /v2/invoices with
  * `type: "creditNote"` and `creditedInvoiceId` (the invoices resource:
  * "Whether to create an invoice or a credit note", and the `creditedInvoice`
- * belongs-to). The customer, currency, VAT mode, exchange rate and payment
- * terms are those of the invoice. Lines are copied from the invoice's lines
+ * belongs-to). The documentation does not give the type's literal values;
+ * "creditNote" is assumed. The customer, currency, VAT mode, exchange rate
+ * and payment terms (mode and days) are those of the invoice. Lines are copied from the invoice's lines
  * with positive quantities and prices, as on the invoice: the credit note's
  * type is what makes them a credit.
  *
@@ -754,8 +758,14 @@ export async function createCreditNote(client: UpstreamClient, input: CreditNote
 
   let creditLines: Json[];
   if (input.lines === undefined) {
-    // The documented filter on the invoices list: "Filter by creditedInvoiceId belonging to a specific Invoice".
-    const earlier = list(await get(client, '/invoices', { creditedInvoiceId: input.invoiceId, pageSize: 100 }), 'invoices');
+    // The documented filter on the invoices list: "Filter by creditedInvoiceId belonging to a specific Invoice". Every
+    // page is read; when there are more than MAX_SCAN_RECORDS, the credit is refused rather than judged on a part.
+    const { records: earlier, complete } = await scanAll(client, '/invoices', 'invoices', ['id', 'type', 'state', 'creditedInvoiceId'], {
+      creditedInvoiceId: input.invoiceId,
+    });
+    if (!complete) {
+      throw new Error('Refused: this invoice has too many credit notes to check them all. Credit selected lines instead. Nothing was sent.');
+    }
     if (earlier.some(note => note.creditedInvoiceId === input.invoiceId && note.state !== 'voided')) {
       throw new Error(
         'Refused: this invoice already has a credit note. Credit selected lines instead, or void the earlier credit note in Billy. Nothing was sent.',
@@ -781,7 +791,7 @@ export async function createCreditNote(client: UpstreamClient, input: CreditNote
   const invoice: Json = {
     type: 'creditNote',
     creditedInvoiceId: input.invoiceId,
-    ...pick(source, ['contactId', 'currencyId', 'paymentTermsDays', 'taxMode', 'exchangeRate']),
+    ...pick(source, ['contactId', 'currencyId', 'paymentTermsMode', 'paymentTermsDays', 'taxMode', 'exchangeRate']),
     entryDate: input.entryDate,
     ...(input.contactMessage === undefined ? {} : { contactMessage: input.contactMessage }),
     state: 'draft',

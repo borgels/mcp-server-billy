@@ -599,7 +599,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'billy_update_invoice_draft',
     title: 'Update draft invoice (Billy)',
-    description: `Change a draft invoice: its date, payment terms, VAT mode, message or lines; fields left out stay as they are. Lines, when given, replace all the invoice's lines. Reads the invoice just before the change and refuses unless it is a draft invoice (not approved, and not a credit note). The customer cannot be changed (Billy does not allow it): delete the draft and create a new one. ${WRITE_NOTE}`,
+    description: `Change a draft invoice: its date, payment terms, VAT mode, message or lines; fields left out stay as they are. Lines, when given, replace all the invoice's lines. Reads the invoice just before the change and refuses unless it is a draft invoice (not approved, and not a credit note). The customer cannot be changed (Billy does not allow it): delete the draft and create a new one. Billy's documentation is unclear on whether the date and lines of a created invoice can be changed; if Billy refuses, its status is returned and nothing is changed. ${WRITE_NOTE}`,
     inputShape: {
       invoiceId: recordId('The id of the draft invoice.'),
       entryDate: dateSchema.optional().describe('Invoice date, YYYY-MM-DD.'),
@@ -658,7 +658,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
   defineTool({
     name: 'billy_create_credit_note',
     title: 'Create draft credit note (Billy)',
-    description: `Create a credit note as a draft for an approved (booked) invoice: for the whole invoice, or for chosen lines of it, each with at most the quantity and unit price on the invoice. The customer, currency, VAT mode and payment terms are the invoice's. Reads the invoice first and refuses unless it is an approved invoice (not a draft, and not a credit note); a whole credit is refused when the invoice already has a credit note. A line with a discount can only be credited whole. It is not approved or sent: approve it with approve_invoice and e-mail it with send_invoice. It moves no money. ${WRITE_NOTE}`,
+    description: `Create a credit note as a draft for an approved (booked) invoice: for the whole invoice, or for chosen lines of it, each with at most the quantity and unit price on the invoice. The customer, currency, VAT mode and payment terms are the invoice's. It is sent with type creditNote, which Billy's documentation does not name; if Billy refuses it, its status is returned and nothing is created. Reads the invoice first and refuses unless it is an approved invoice (not a draft, and not a credit note); a whole credit is refused when the invoice already has a credit note. A line with a discount can only be credited whole. It is not approved or sent: approve it with approve_invoice and e-mail it with send_invoice. It moves no money. ${WRITE_NOTE}`,
     inputShape: {
       invoiceId: recordId('The approved invoice to credit, from list_invoices.'),
       entryDate: dateSchema.describe('Date of the credit note, YYYY-MM-DD.'),
