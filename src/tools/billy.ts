@@ -20,6 +20,7 @@ import {
   BILL_FILTERS,
   checkConnection,
   createContact,
+  createCreditNote,
   createDaybookTransaction,
   createDraftBill,
   createDraftInvoice,
@@ -46,6 +47,7 @@ import {
   registerPayment,
   sendInvoiceEmail,
   updateContact,
+  updateInvoiceDraft,
   updateProduct,
 } from '../billy/resources.js';
 import { checkInputPolicy, checkToolPolicy, currentInstancePolicy, isToolDisabled, redactInScope, runInCallScope, validatePolicyConfig } from '../billy/policy.js';
@@ -216,6 +218,17 @@ const dueDateShape = {
   maxDueDate: dateSchema.optional().describe('Only those due on or before this date, YYYY-MM-DD.'),
 };
 const stateSchema = z.enum(['draft', 'approved', 'voided']);
+const invoiceLinesSchema = z
+  .array(
+    z.strictObject({
+      productId: recordId('The product id, from list_products.'),
+      description: text(1000).optional().describe('Text under the product name on the line.'),
+      quantity: z.number().positive().max(1_000_000).optional().describe('Quantity (default 1).'),
+      unitPrice: z.number().min(0).max(MAX_AMOUNT).describe('Price per unit in the invoice currency.'),
+    }),
+  )
+  .min(1)
+  .max(100);
 
 const contactFieldsShape = {
   type: z.enum(['company', 'person']).optional().describe('company (default) or person.'),
@@ -574,18 +587,7 @@ export const BILLY_TOOLS: ToolDefinition[] = [
       paymentTermsDays: z.number().int().min(-365).max(365).describe('Payment terms in days (get_contact gives the customer\'s).'),
       taxMode: z.enum(['incl', 'excl']).optional().describe('Unit prices include (incl) or exclude (excl) VAT. Default: the company setting.'),
       contactMessage: text(2000).optional().describe('Message to the customer at the top of the invoice.'),
-      lines: z
-        .array(
-          z.strictObject({
-            productId: recordId('The product id, from list_products.'),
-            description: text(1000).optional().describe('Text under the product name on the line.'),
-            quantity: z.number().positive().max(1_000_000).optional().describe('Quantity (default 1).'),
-            unitPrice: z.number().min(0).max(MAX_AMOUNT).describe('Price per unit in the invoice currency.'),
-          }),
-        )
-        .min(1)
-        .max(100)
-        .describe('Invoice lines, at least one.'),
+      lines: invoiceLinesSchema.describe('Invoice lines, at least one.'),
     },
     annotations: WRITE_TOOL_ANNOTATIONS,
     returnsUpstreamContent: true,
@@ -593,6 +595,29 @@ export const BILLY_TOOLS: ToolDefinition[] = [
     upstream: [{ access: 'write', method: 'POST', path: '/invoices' }],
     change: change('create', 'invoice', { contactId: 'recordId', entryDate: 'date', currencyId: 'currency', lines: 'count' }),
     handler: async (client, input) => createDraftInvoice(client, input),
+  }),
+  defineTool({
+    name: 'billy_update_invoice_draft',
+    title: 'Update draft invoice (Billy)',
+    description: `Change a draft invoice: its date, payment terms, VAT mode, message or lines; fields left out stay as they are. Lines, when given, replace all the invoice's lines. Reads the invoice just before the change and refuses unless it is a draft invoice (not approved, and not a credit note). The customer cannot be changed (Billy does not allow it): delete the draft and create a new one. Billy's documentation is unclear on whether the date and lines of a created invoice can be changed; if Billy refuses, its status is returned and nothing is changed. ${WRITE_NOTE}`,
+    inputShape: {
+      invoiceId: recordId('The id of the draft invoice.'),
+      entryDate: dateSchema.optional().describe('Invoice date, YYYY-MM-DD.'),
+      paymentTermsDays: z.number().int().min(-365).max(365).optional().describe('Payment terms in days.'),
+      taxMode: z.enum(['incl', 'excl']).optional().describe('Unit prices include (incl) or exclude (excl) VAT.'),
+      contactMessage: text(2000).optional().describe('Message to the customer at the top of the invoice.'),
+      lines: invoiceLinesSchema.optional().describe("New lines, at least one; they replace all the invoice's lines."),
+    },
+    annotations: WRITE_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Updated draft invoice.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/invoices/{invoiceId}' },
+      { access: 'write', method: 'PUT', path: '/invoices/{invoiceId}' },
+    ],
+    change: change('update', 'invoice', { invoiceId: 'recordId', entryDate: 'date', lines: 'count' }),
+    check: atLeastOneChange(['entryDate', 'paymentTermsDays', 'taxMode', 'contactMessage', 'lines']),
+    handler: async (client, input) => updateInvoiceDraft(client, input),
   }),
   defineTool({
     name: 'billy_approve_invoice',
@@ -629,6 +654,42 @@ export const BILLY_TOOLS: ToolDefinition[] = [
     ],
     change: change('send', 'invoice', { invoiceId: 'recordId', contactPersonId: 'recordId' }),
     handler: async (client, input) => sendInvoiceEmail(client, input),
+  }),
+  defineTool({
+    name: 'billy_create_credit_note',
+    title: 'Create draft credit note (Billy)',
+    description: `Create a credit note as a draft for an approved (booked) invoice: for the whole invoice, or for chosen lines of it, each with at most the quantity and unit price on the invoice. The customer, currency, VAT mode and payment terms are the invoice's. It is sent with type creditNote, which Billy's documentation does not name; if Billy refuses it, its status is returned and nothing is created. Reads the invoice first and refuses unless it is an approved invoice (not a draft, and not a credit note); a whole credit is refused when the invoice already has a credit note. A line with a discount can only be credited whole. It is not approved or sent: approve it with approve_invoice and e-mail it with send_invoice. It moves no money. ${WRITE_NOTE}`,
+    inputShape: {
+      invoiceId: recordId('The approved invoice to credit, from list_invoices.'),
+      entryDate: dateSchema.describe('Date of the credit note, YYYY-MM-DD.'),
+      contactMessage: text(2000).optional().describe('Message to the customer at the top of the credit note.'),
+      lines: z
+        .array(
+          z.strictObject({
+            lineId: recordId("The invoice line to credit (the line's id, from get_invoice)."),
+            quantity: z.number().positive().max(1_000_000).optional().describe("Quantity to credit, at most the line's (default: the line's)."),
+            unitPrice: z.number().positive().max(MAX_AMOUNT).optional().describe("Unit price to credit, at most the line's (default: the line's)."),
+          }),
+        )
+        .min(1)
+        .max(100)
+        .optional()
+        .describe('Only these lines of the invoice. Left out: the whole invoice is credited.'),
+    },
+    annotations: WRITE_TOOL_ANNOTATIONS,
+    returnsUpstreamContent: true,
+    summary: 'Created draft credit note.',
+    upstream: [
+      { access: 'read', method: 'GET', path: '/invoices/{invoiceId}' },
+      { access: 'read', method: 'GET', path: '/invoices' },
+      { access: 'write', method: 'POST', path: '/invoices' },
+    ],
+    change: change('create', 'invoice', { invoiceId: 'recordId', entryDate: 'date', lines: 'count' }),
+    check: input => {
+      const chosen = ((input.lines as Array<{ lineId: string }> | undefined) ?? []).map(line => line.lineId);
+      return new Set(chosen).size === chosen.length ? undefined : 'Give each invoice line at most once.';
+    },
+    handler: async (client, input) => createCreditNote(client, input),
   }),
   defineTool({
     name: 'billy_delete_draft_invoice',

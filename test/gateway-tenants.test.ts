@@ -192,6 +192,8 @@ const SAMPLE_INPUTS: Record<string, GatewayJsonObject> = {
   update_product: { productId: 'p1', name: 'Renamed' },
   create_draft_invoice: { contactId: 'c1', entryDate: '2026-11-19', currencyId: 'DKK', paymentTermsDays: 8, lines: [{ productId: 'p1', unitPrice: 100 }] },
   approve_invoice: { invoiceId: 'i1' },
+  update_invoice_draft: { invoiceId: 'i1', paymentTermsDays: 14 },
+  create_credit_note: { invoiceId: 'i2', entryDate: '2026-11-26' },
   register_payment: { billId: 'b1', cashAccountId: 'a1', amount: 100, entryDate: '2026-11-19' },
   create_daybook_transaction: { entryDate: '2026-11-19', lines: [{ accountId: 'a1', amount: 10, side: 'debit' }] },
   send_invoice: { invoiceId: 'i2', contactPersonId: 'cp1', emailSubject: 'Invoice', emailBody: 'Here is the invoice.' },
@@ -212,8 +214,14 @@ async function catalogFetch(input: string | URL | Request, init?: RequestInit): 
   const path = new URL(String(input)).pathname;
   if (init?.method === 'DELETE') return Response.json({ meta: { deletedRecords: { invoices: ['i1'], bills: ['b2'] } } });
   if (path.endsWith('/emails')) return Response.json({});
-  if (path.endsWith('/invoices/i2')) return Response.json({ invoice: { id: 'i2', state: 'approved', contactId: 'c1' } });
-  if (path.includes('/invoices/')) return Response.json({ invoice: { id: 'i1', state: 'draft', sentState: 'unsent' }, invoices: [{ id: 'i1' }] });
+  if (path.endsWith('/invoices/i2')) {
+    return Response.json({
+      invoice: { id: 'i2', type: 'invoice', state: 'approved', contactId: 'c1', lines: [{ id: 'l1', productId: 'p1', quantity: 1, unitPrice: 100 }] },
+    });
+  }
+  if (path.includes('/invoices/')) {
+    return Response.json({ invoice: { id: 'i1', type: 'invoice', state: 'draft', sentState: 'unsent' }, invoices: [{ id: 'i1' }] });
+  }
   if (path.includes('/contactPersons/')) return Response.json({ contactPerson: { id: 'cp1', contactId: 'c1', email: 'buyer@example.test' } });
   if (path.endsWith('/bills/b2')) return Response.json({ bill: { id: 'b2', state: 'draft' }, bills: [{ id: 'b2' }] });
   if (path.includes('/bills/')) return Response.json({ bill: { id: 'b1', organizationId: 'x1', type: 'bill', state: 'approved', isPaid: false, balance: 100, currencyId: 'DKK' } });
